@@ -2,3 +2,4 @@ discord.py
 requests
 pandas
 openpyxl
+flask

@@ -1,20 +1,46 @@
 import asyncio
+import os
 import re
 import sqlite3
-import discord
+from threading import Thread
 from discord import app_commands
 from discord.ext import commands, tasks
+import discord
+from flask import Flask
 import requests
 
 # ==========================================
 # ⚙️ 설정 구역
 # ==========================================
-# 1단계에서 발급받은 디스코드 봇 토큰을 아래 큰따옴표 안에 넣으세요!
-BOT_TOKEN = "YOUR_DISCORD_BOT_TOKEN_HERE"
+# 1단계에서 발급받은 디스코드 봇 토큰을 입력하세요!
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
 
 # 제공해주신 채널 ID 적용 완료
 MONITOR_CHANNEL_ID = 973162050333327390  # 모니터링할 채널 ID
 REPORT_CHANNEL_ID = 1532160917943484626  # 결과를 보고받을 채널 ID
+
+# ==========================================
+# 🌐 Render Web Service 유지용 Flask 가짜 웹 서버
+# ==========================================
+web_app = Flask("")
+
+
+@web_app.route("/")
+def home():
+    return "WOS Discord Bot is Active and Running!"
+
+
+def run_web():
+    # Render가 자동으로 지정해주는 포트를 읽어옵니다 (기본값 8080)
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
+
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
+
 
 # ==========================================
 # 🗄️ 데이터베이스 세팅 (SQLite)
@@ -170,11 +196,10 @@ async def monitor_coupon_channel():
     try:
         # 최근 메시지 5개 확인
         async for message in channel.history(limit=5):
-            # 영문 대문자 + 숫자 조합의 6~15자리 코드 패턴 추출 (예: WOS1234, HAPPY2026)
+            # 영문 대문자 + 숫자 조합의 6~15자리 코드 패턴 추출
             found_codes = re.findall(r"\b[A-Z0-9]{6,15}\b", message.content)
 
             for code in found_codes:
-                # 코드 가공 및 DB 비교
                 cursor.execute(
                     "SELECT code FROM used_codes WHERE code = ?", (code,)
                 )
@@ -261,5 +286,9 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     )
 
 
-# 봇 실행
-bot.run(BOT_TOKEN)
+# ==========================================
+# 🚀 메인 실행 부분
+# ==========================================
+if __name__ == "__main__":
+    keep_alive()  # Render Web Service용 백그라운드 서버 실행
+    bot.run(BOT_TOKEN)  # 디스코드 봇 실행
