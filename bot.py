@@ -2,22 +2,20 @@ import asyncio
 import os
 import re
 import sqlite3
-import time
+import sys
 from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.async_api import async_playwright
 
 # ==========================================
-# ⚙️ 설정 구역
+# ⚙️ 실시간 로그 및 기본 설정 구역
 # ==========================================
+# Render 콘솔에서 print() 로그가 즉시 출력되도록 버퍼링 해제
+sys.stdout.reconfigure(line_buffering=True)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
 
 MONITOR_CHANNEL_ID = 973162050333327390  # 모니터링할 채널 ID
@@ -91,85 +89,72 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 셀레니움 기반 기프트코드 웹 자동 교환 로직
+# 🔄 Playwright 기반 웹 자동 입력 로직
 # ==========================================
-def execute_redeem_api(uid: str, server: int, gift_code: str) -> bool:
-    """웹사이트 UI에 접속하여 플레이어 ID, 왕국, 교환 코드를 입력하는 로직"""
-    driver = None
-    try:
-        # 1. 셀레니움 옵션 세팅 (Linux/Render 헤드리스 크롬)
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=options
-        )
-        wait = WebDriverWait(driver, 10)
-
-        # 2. 교환 센터 접속
-        driver.get("https://wos-giftcode.centurygame.com/")
-        time.sleep(2)
-
-        # 3. [플레이어 ID] 입력
-        id_input = wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.XPATH,
-                    "//input[@placeholder='플레이어 ID' or contains(@placeholder, 'Player ID')]",
-                )
+async def execute_redeem_playwright(
+    uid: str, server: int, gift_code: str
+) -> bool:
+    """웹사이트 UI에 플레이어 ID, 왕국, 교환 코드를 입력하는 핵심 함수"""
+    async with async_playwright() as p:
+        browser = None
+        try:
+            # 헤드리스 크롬 실행 (Render 권한 문제 우회)
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
-        )
-        id_input.clear()
-        id_input.send_keys(str(uid))
+            page = await context.new_page()
 
-        # 4. [왕국] 입력
-        server_input = driver.find_element(
-            By.XPATH,
-            "//input[@placeholder='왕국' or contains(@placeholder, 'Kingdom')]",
-        )
-        server_input.clear()
-        server_input.send_keys(str(server))
+            # 교환 센터 접속
+            await page.goto(
+                "https://wos-giftcode.centurygame.com/", timeout=30000
+            )
+            await page.wait_for_timeout(1500)
 
-        # 5. [교환 코드] 입력
-        code_input = driver.find_element(
-            By.XPATH,
-            "//input[contains(@placeholder, '교환 코드를 입력') or contains(@placeholder, 'Gift Code')]",
-        )
-        code_input.clear()
-        code_input.send_keys(str(gift_code))
+            # 1. [플레이어 ID] 입력
+            id_input = page.locator(
+                "input[placeholder*='플레이어 ID'], input[placeholder*='Player ID']"
+            ).first
+            await id_input.fill(str(uid))
 
-        # 6. [교환 확인] 버튼 클릭
-        confirm_btn = driver.find_element(
-            By.XPATH,
-            "//button[contains(., '교환 확인') or contains(text(), '교환 확인')]",
-        )
-        confirm_btn.click()
-        time.sleep(2)
+            # 2. [왕국] 입력
+            server_input = page.locator(
+                "input[placeholder*='왕국'], input[placeholder*='Kingdom']"
+            ).first
+            await server_input.fill(str(server))
 
-        # 7. 성공 여부 확인
-        page_source = driver.page_source
-        if (
-            "성공" in page_source
-            or "SUCCESS" in page_source.upper()
-            or "발송" in page_source
-        ):
-            return True
-        else:
-            print(f"❌ 교환 실패 (UID: {uid}, 서버: {server})")
+            # 3. [교환 코드] 입력
+            code_input = page.locator(
+                "input[placeholder*='교환 코드'], input[placeholder*='Gift Code']"
+            ).first
+            await code_input.fill(str(gift_code))
+
+            # 4. [교환 확인] 버튼 클릭
+            confirm_btn = page.locator(
+                "button:has-text('교환 확인'), button:has-text('Confirm')"
+            ).first
+            await confirm_btn.click()
+            await page.wait_for_timeout(2500)
+
+            # 5. 결과 확인
+            content = await page.content()
+
+            if (
+                "성공" in content
+                or "SUCCESS" in content.upper()
+                or "발송" in content
+            ):
+                return True
+            else:
+                print(f"❌ 교환 실패 (UID: {uid}, 서버: {server})")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ Playwright 입력 중 에러 발생 (UID: {uid}): {e}")
             return False
-
-    except Exception as e:
-        print(f"⚠️ 교환 중 오류 발생 (UID: {uid}): {e}")
-        return False
-    finally:
-        if driver:
-            driver.quit()
+        finally:
+            if browser:
+                await browser.close()
 
 
 async def process_mass_redeem(gift_code: str, target_channel):
@@ -208,11 +193,8 @@ async def process_mass_redeem(gift_code: str, target_channel):
     fail_count = 0
 
     for idx, (uid, server) in enumerate(rows, 1):
-        # 동기 셀레니움 함수를 비동기 루프에서 실행
-        loop = asyncio.get_event_loop()
-        is_success = await loop.run_in_executor(
-            None, execute_redeem_api, uid, server, gift_code
-        )
+        # Playwright 비동기 함수 직접 호출
+        is_success = await execute_redeem_playwright(uid, server, gift_code)
 
         if is_success:
             success_count += 1

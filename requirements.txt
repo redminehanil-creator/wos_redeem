@@ -3,5 +3,4 @@ requests
 pandas
 openpyxl
 flask
-selenium
-webdriver-manager
+playwright
