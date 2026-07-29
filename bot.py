@@ -2,12 +2,18 @@ import asyncio
 import os
 import re
 import sqlite3
+import time
 from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 # ==========================================
 # ⚙️ 설정 구역
@@ -54,7 +60,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# 사용된 기프트코드 기록 테이블 (결과 요약 데이터 컬럼 추가)
+# 사용된 기프트코드 기록 테이블
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS used_codes (
     code TEXT PRIMARY KEY,
@@ -85,23 +91,85 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 기프트코드 교환 핵심 로직
+# 🔄 셀레니움 기반 기프트코드 웹 자동 교환 로직
 # ==========================================
 def execute_redeem_api(uid: str, server: int, gift_code: str) -> bool:
-    """실제 WOS 교환 API 호출 함수"""
-    url = "https://wos-giftcode-api.centurygame.com/api/gift_code"
-    payload = {
-        "fid": str(uid),
-        "cdk": gift_code,
-        "time_zone": "Asia/Seoul",
-    }
-
+    """웹사이트 UI에 접속하여 플레이어 ID, 왕국, 교환 코드를 입력하는 로직"""
+    driver = None
     try:
-        response = requests.post(url, data=payload, timeout=5)
-        res_data = response.json()
-        return res_data.get("err_code") == 0
-    except Exception:
+        # 1. 셀레니움 옵션 세팅 (Linux/Render 헤드리스 크롬)
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), options=options
+        )
+        wait = WebDriverWait(driver, 10)
+
+        # 2. 교환 센터 접속
+        driver.get("https://wos-giftcode.centurygame.com/")
+        time.sleep(2)
+
+        # 3. [플레이어 ID] 입력
+        id_input = wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//input[@placeholder='플레이어 ID' or contains(@placeholder, 'Player ID')]",
+                )
+            )
+        )
+        id_input.clear()
+        id_input.send_keys(str(uid))
+
+        # 4. [왕국] 입력
+        server_input = driver.find_element(
+            By.XPATH,
+            "//input[@placeholder='왕국' or contains(@placeholder, 'Kingdom')]",
+        )
+        server_input.clear()
+        server_input.send_keys(str(server))
+
+        # 5. [교환 코드] 입력
+        code_input = driver.find_element(
+            By.XPATH,
+            "//input[contains(@placeholder, '교환 코드를 입력') or contains(@placeholder, 'Gift Code')]",
+        )
+        code_input.clear()
+        code_input.send_keys(str(gift_code))
+
+        # 6. [교환 확인] 버튼 클릭
+        confirm_btn = driver.find_element(
+            By.XPATH,
+            "//button[contains(., '교환 확인') or contains(text(), '교환 확인')]",
+        )
+        confirm_btn.click()
+        time.sleep(2)
+
+        # 7. 성공 여부 확인
+        page_source = driver.page_source
+        if (
+            "성공" in page_source
+            or "SUCCESS" in page_source.upper()
+            or "발송" in page_source
+        ):
+            return True
+        else:
+            print(f"❌ 교환 실패 (UID: {uid}, 서버: {server})")
+            return False
+
+    except Exception as e:
+        print(f"⚠️ 교환 중 오류 발생 (UID: {uid}): {e}")
         return False
+    finally:
+        if driver:
+            driver.quit()
 
 
 async def process_mass_redeem(gift_code: str, target_channel):
@@ -133,26 +201,30 @@ async def process_mass_redeem(gift_code: str, target_channel):
     status_msg = None
     if target_channel:
         status_msg = await target_channel.send(
-            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{len(rows)}명** 교환 작업을 시작합니다."
+            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{len(rows)}명** 자동 입력 작업을 시작합니다."
         )
 
     success_count = 0
     fail_count = 0
 
     for idx, (uid, server) in enumerate(rows, 1):
-        is_success = execute_redeem_api(uid, server, gift_code)
+        # 동기 셀레니움 함수를 비동기 루프에서 실행
+        loop = asyncio.get_event_loop()
+        is_success = await loop.run_in_executor(
+            None, execute_redeem_api, uid, server, gift_code
+        )
 
         if is_success:
             success_count += 1
         else:
             fail_count += 1
 
-        if status_msg and (idx % 5 == 0 or idx == len(rows)):
+        if status_msg and (idx % 3 == 0 or idx == len(rows)):
             await status_msg.edit(
-                content=f"🔄 **교환 진행 중...** [`{gift_code}`] [{idx}/{len(rows)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
+                content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(rows)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
             )
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1)
 
     # 3. 교환 결과를 DB 히스토리에 기록
     summary = f"성공 {success_count}명 / 실패 {fail_count}명"
@@ -214,11 +286,10 @@ async def before_monitor():
 # ==========================================
 
 
-# 1. 유저 ID 및 서버 등록
 @bot.tree.command(
-    name="등록", description="본인의 WOS UID와 서버 번호를 등록합니다."
+    name="등록", description="본인의 WOS UID와 서버 번호(왕국)를 등록합니다."
 )
-@app_commands.describe(uid="플레이어 ID (숫자)", server="서버 번호 (숫자)")
+@app_commands.describe(uid="플레이어 ID (숫자)", server="왕국 번호 (숫자)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
     discord_id = str(interaction.user.id)
 
@@ -236,12 +307,11 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
         color=0x3498DB,
     )
     embed.add_field(name="UID", value=uid, inline=True)
-    embed.add_field(name="서버", value=f"{server}번 서버", inline=True)
+    embed.add_field(name="왕국(서버)", value=f"{server}번", inline=True)
 
     await interaction.response.send_message(embed=embed)
 
 
-# 2. 유저 등록 정보 확인
 @bot.tree.command(
     name="내정보", description="현재 등록되어 있는 내 정보를 확인합니다."
 )
@@ -255,15 +325,14 @@ async def my_info(interaction: discord.Interaction):
 
     if row:
         await interaction.response.send_message(
-            f"ℹ️ **등록 정보**: UID `{row[0]}` / 서버 `{row[1]}`번"
+            f"ℹ️ **등록 정보**: UID `{row[0]}` / 왕국 `{row[1]}`번"
         )
     else:
         await interaction.response.send_message(
-            "❌ 등록된 정보가 없습니다. `/등록 [UID] [서버번호]` 명령어로 등록해주세요."
+            "❌ 등록된 정보가 없습니다. `/등록 [UID] [왕국번호]` 명령어로 등록해주세요."
         )
 
 
-# 3. ✨ [신규 기능] 기프트코드 교환 히스토리/내역 조회
 @bot.tree.command(
     name="히스토리",
     description="최근 봇이 처리한 기프트코드 교환 내역을 확인합니다.",
@@ -289,7 +358,6 @@ async def show_history(interaction: discord.Interaction):
     )
 
     for code, summary, used_at in rows:
-        # 날짜 포맷 정리 (YYYY-MM-DD HH:MM)
         date_str = str(used_at).split(".")[0]
         embed.add_field(
             name=f"🎁 코드: `{code}`",
@@ -300,7 +368,6 @@ async def show_history(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# 4. ✨ [신규 기능] 등록된 유저 현황 확인 (관리자/전체용)
 @bot.tree.command(
     name="유저목록",
     description="현재 자동 교환에 등록된 총 유저 수 현황을 확인합니다.",
@@ -317,7 +384,6 @@ async def user_count(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# 5. 관리자 직접 기프트코드 입력 실행
 @bot.tree.command(
     name="쿠폰발송",
     description="[관리자] 기프트코드를 입력하여 전체 유저에게 일괄 등록합니다.",
