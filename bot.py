@@ -1,6 +1,7 @@
 import asyncio
 import os
 import threading
+import datetime
 from flask import Flask
 import discord
 from discord import app_commands
@@ -22,7 +23,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
-# 별도 쓰레드에서 Flask 실행
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
         try:
             # 1. 쿠폰 웹사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1000)  # CPU 및 DOM 안착 대기
+            await page.wait_for_timeout(1000)
 
             # 2. Player ID 입력
             uid_input = page.locator("input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']").first
@@ -131,20 +131,16 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
     return False
 
 # ---------------------------------------------------------------------------
-# 4. 병렬 큐(Queue) 처리 및 중단 로직
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# 4. 병렬 큐(Queue) 처리, 실시간 진행률 및 중단 로직
+# 4. 병렬 큐(Queue) 처리 및 실시간 진행률 로직
 # ---------------------------------------------------------------------------
 async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
     global cancel_mass_redeem
-    cancel_mass_redeem = False  # 작업 시작 시 중단 플래그 리셋
+    cancel_mass_redeem = False
 
     if not sheet_users:
         await interaction.followup.send("❌ Google Sheet DB가 연결되어 있지 않습니다.", ephemeral=True)
         return
 
-    # 구글 시트 유저 데이터 파싱
     raw_data = sheet_users.get_all_records()
     users = []
     for row in raw_data:
@@ -160,13 +156,11 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
 
     total_count = len(users)
 
-    # 📊 진행률을 채널에 공개 메시지로 전송 (이 메시지를 계속 수정함)
     progress_msg = await interaction.channel.send(
         f"🚀 **쿠폰 대량 교환 시작!** (코드: `{gift_code}`)\n"
         f"📊 **진행률**: `0 / {total_count}`명 (0%) | ⏳ 처리 중..."
     )
 
-    # 대기열(Queue) 생성
     queue = asyncio.Queue()
     for u in users:
         await queue.put(u)
@@ -204,7 +198,6 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
                     else:
                         fail_count += 1
 
-                    # 💡 5명 단위 처리 완료 시 OR 마지막 계정 완료 시 진행률 메시지 수정 (Rate Limit 방지)
                     if processed_count % 5 == 0 or processed_count == total_count:
                         percentage = round((processed_count / total_count) * 100)
                         try:
@@ -226,7 +219,6 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
         await asyncio.gather(*tasks)
         await browser.close()
 
-    # 🎯 최종 완료 메시지로 전환
     if cancel_mass_redeem:
         await progress_msg.edit(
             content=(
@@ -246,12 +238,11 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
         )
 
         if sheet_codes:
-            import datetime
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sheet_codes.append_row([gift_code, now_str])
-            
+
 # ---------------------------------------------------------------------------
-# 5. 디스코드 이벤트 및 슬래시 커맨드 (/register, /sendcoupon, /stop)
+# 5. 디스코드 이벤트 및 슬래시 커맨드 모음
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
@@ -262,7 +253,7 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Command Sync Error: {e}")
 
-# 1) /register 커맨드 (나에게만 보임, E열 from 기록 지원)
+# 1) /register 커맨드 (계정 등록/수정)
 @bot.tree.command(name="register", description="WOS 계정(UID 및 State 번호)을 등록하거나 수정합니다.")
 @app_commands.describe(uid="플레이어 ID (숫자)", server="왕국 / State 번호 (숫자)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
@@ -274,18 +265,15 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     username = interaction.user.display_name
     uid_str = str(uid).strip()
 
-    # 명령어가 실행된 디스코드 서버 이름 추적
     guild_name = interaction.guild.name if interaction.guild else "Direct Message"
-
     raw_users = sheet_users.get_all_values()
 
-    # 이미 존재하는 UID 확인 후 최신화
     for row_idx, row in enumerate(raw_users[1:], start=2):
         if len(row) >= 3 and str(row[2]).strip() == uid_str:
             sheet_users.update_cell(row_idx, 1, discord_id)
             sheet_users.update_cell(row_idx, 2, username)
             sheet_users.update_cell(row_idx, 4, str(server))
-            sheet_users.update_cell(row_idx, 5, guild_name)  # E열(from) 기록
+            sheet_users.update_cell(row_idx, 5, guild_name)
             
             await interaction.response.send_message(
                 f"🔄 **{username}**님의 UID `{uid_str}` 정보가 수정되었습니다. (State: `{server}`, Server: **{guild_name}**)",
@@ -293,7 +281,6 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
             )
             return
 
-    # 신규 등록 (E열 5번째 항목 포함)
     sheet_users.append_row([discord_id, username, uid_str, str(server), guild_name])
 
     embed = discord.Embed(
@@ -307,17 +294,94 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 2) /sendcoupon 커맨드 (쿠폰 대량 발송 시작)
+# 2) /sendcoupon 커맨드 (쿠폰 대량 발송)
 @bot.tree.command(name="sendcoupon", description="모든 등록된 계정에 쿠폰 코드를 교환합니다.")
 @app_commands.describe(code="교환할 쿠폰 코드")
 async def send_coupon(interaction: discord.Interaction, code: str):
     gift_code = code.strip()
+
+    if sheet_codes:
+        used_records = sheet_codes.get_all_records()
+        used_list = [str(r.get("code", "")).strip().upper() for r in used_records]
+        if gift_code.upper() in used_list:
+            await interaction.response.send_message(
+                f"⚠️ **이미 사용 처리된 쿠폰 코드입니다!** (`{gift_code}`)\n중복 발송을 방지하기 위해 작업을 실행하지 않습니다.",
+                ephemeral=True
+            )
+            return
+
     await interaction.response.defer(ephemeral=True)
-    
-    # 백그라운드로 작업 실행
     asyncio.create_task(process_mass_redeem(gift_code, interaction))
 
-# 3) /stop 커맨드 (작업 강제 중단)
+# 3) /history 커맨드 (쿠폰 사용 내역 조회 - 복원완료!)
+@bot.tree.command(name="history", description="지금까지 발송 완료된 쿠폰 코드 목록을 조회합니다.")
+async def history(interaction: discord.Interaction):
+    if not sheet_codes:
+        await interaction.response.send_message("❌ 사용 내역 DB에 접근할 수 없습니다.", ephemeral=True)
+        return
+
+    records = sheet_codes.get_all_records()
+    if not records:
+        await interaction.response.send_message("📜 지금까지 발송된 쿠폰 내역이 없습니다.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📜 쿠폰 발송 히스토리", color=0x2ECC71)
+    
+    # 최근 10개만 출력 (Embed 길이 제한 고려)
+    recent_records = records[-10:]
+    recent_records.reverse()
+
+    for r in recent_records:
+        code = r.get("code", "Unknown")
+        used_at = r.get("used_at", "Unknown Date")
+        embed.add_field(name=f"🎟️ {code}", value=f"🕒 발송 일시: {used_at}", inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# 4) /delete_user 커맨드 (관리자용: 특정 UID 등록 삭제 - 복원완료!)
+@bot.tree.command(name="delete_user", description="[관리자] 특정 UID의 계정 정보를 시트에서 삭제합니다.")
+@app_commands.describe(uid="삭제할 플레이어 UID")
+@app_commands.checks.has_permissions(administrator=True)
+async def delete_user(interaction: discord.Interaction, uid: str):
+    if not sheet_users:
+        await interaction.response.send_message("❌ 구글 시트 DB가 연결되어 있지 않습니다.", ephemeral=True)
+        return
+
+    target_uid = str(uid).strip()
+    raw_users = sheet_users.get_all_values()
+
+    for row_idx, row in enumerate(raw_users[1:], start=2):
+        if len(row) >= 3 and str(row[2]).strip() == target_uid:
+            sheet_users.delete_rows(row_idx)
+            await interaction.response.send_message(f"🗑️ UID `{target_uid}` 계정이 삭제되었습니다.", ephemeral=True)
+            return
+
+    await interaction.response.send_message(f"❌ UID `{target_uid}` 항목을 찾을 수 없습니다.", ephemeral=True)
+
+@delete_user.error
+async def delete_user_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
+
+# 5) /clear_history 커맨드 (관리자용: 쿠폰 히스토리 초기화 - 복원완료!)
+@bot.tree.command(name="clear_history", description="[관리자] 발송된 쿠폰 내역(used_codes)을 모두 초기화합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def clear_history(interaction: discord.Interaction):
+    if not sheet_codes:
+        await interaction.response.send_message("❌ 시트 DB가 연동되지 않았습니다.", ephemeral=True)
+        return
+
+    # 헤더 제외한 데이터 전체 삭제 후 헤더 재작성
+    sheet_codes.clear()
+    sheet_codes.append_row(["code", "used_at"])
+    await interaction.response.send_message("🧹 **쿠폰 발송 히스토리가 성공적으로 초기화되었습니다!**", ephemeral=True)
+
+@clear_history.error
+async def clear_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
+
+# 6) /stop 커맨드 (작업 강제 중단)
 @bot.tree.command(name="stop", description="진행 중인 쿠폰 교환 작업을 강제 중단합니다.")
 async def stop_redeem(interaction: discord.Interaction):
     global cancel_mass_redeem
