@@ -24,23 +24,28 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
+# 별도 쓰레드에서 Flask 실행
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---------------------------------------------------------------------------
-# 2. 전역 변수 및 디스코드 / 구글 시트 세팅 (오류 디버깅 강화)
+# 2. 전역 변수 및 디스코드 / 구글 시트 세팅 (실시간 버퍼 지우기 flush=True 적용)
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "WOS_Coupon_DB")
 GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "")
 
+# 🛑 대량 교환 강제 중단 스위치
 cancel_mass_redeem = False
 
+# 디스코드 봇 인텐트 설정
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# 구글 시트 연동 객체 및 에러 메시지 변수
 sheet_users = None
 sheet_codes = None
+db_error_reason = ""
 
 try:
     scope = [
@@ -53,7 +58,7 @@ try:
 
     env_str = GOOGLE_JSON_ENV.strip()
     
-    # Render 환경변수 앞뒤에 잘못 붙은 따옴표 제거
+    # Render 환경 변수 앞뒤에 잘못 붙은 따옴표 제거
     if (env_str.startswith("'") and env_str.endswith("'")) or (env_str.startswith('"') and env_str.endswith('"')):
         env_str = env_str[1:-1].strip()
 
@@ -75,36 +80,45 @@ try:
         sheet_codes = doc.add_worksheet(title="used_codes", rows="1000", cols="2")
         sheet_codes.append_row(["code", "used_at"])
         
-    print("✅ Successfully connected to Google Sheets DB!")
+    print("✅ [DB Connect Test] Successfully connected to Google Sheets DB!", flush=True)
 
 except Exception as e:
-    print(f"\n❌ [DB 연동 실패 상세 원인]: {type(e).__name__} - {e}\n")
+    db_error_reason = f"{type(e).__name__} - {e}"
+    print(f"\n❌ [DB 연동 실패 상세 원인]: {db_error_reason}\n", flush=True)
 
 # ---------------------------------------------------------------------------
 # 3. Playwright 핵심 교환 로직 (Render 최적화형)
 # ---------------------------------------------------------------------------
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
+    """wait_for 타임아웃 오류를 방지하고 안정성을 극대화한 자동화 함수"""
     for attempt in range(1, max_retries + 1):
         try:
+            # 1. 쿠폰 웹사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1000)
 
+            # 2. Player ID 입력
             uid_input = page.locator("input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']").first
             await uid_input.fill(str(uid), timeout=10000)
 
+            # 3. State (서버) 입력
             server_input = page.locator("input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']").first
             await server_input.fill(str(server), timeout=10000)
 
+            # 4. Gift Code 입력
             code_input = page.locator("input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']").first
             await code_input.fill(str(gift_code), timeout=10000)
 
             await page.wait_for_timeout(300)
 
+            # 5. 교환 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
             await exchange_btn.click(timeout=10000)
 
+            # 6. 결과 팝업 대기
             await page.wait_for_timeout(2500)
 
+            # 7. 팝업 메시지 분석
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
             if await msg_element.count() > 0:
@@ -114,22 +128,23 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
 
             popup_text_clean = popup_text.strip()
             popup_text_upper = popup_text_clean.upper()
-            print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}")
+            print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}", flush=True)
 
+            # 🎯 팝업 결과 정밀 판정
             if any(k in popup_text or k in popup_text_upper for k in ["REDEEMED", "CLAIM THE REWARDS IN YOUR MAIL", "교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "CONGRATULATIONS"]):
-                print(f"✅ [UID: {uid} / State: {server}] Redeem Success!")
+                print(f"✅ [UID: {uid} / State: {server}] Redeem Success!", flush=True)
                 return True
             elif any(k in popup_text or k in popup_text_upper for k in ["ALREADY CLAIMED", "UNABLE TO CLAIM AGAIN", "이미 수령", "다시 수령", "RECEIVED", "USED"]):
-                print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)")
+                print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)", flush=True)
                 return True
             elif any(k in popup_text or k in popup_text_upper for k in ["GIFT CODE NOT FOUND", "CHARACTER INFO IS INCORRECT", "CASE-SENSITIVE", "존재하지 않습니다", "대소문자", "시간이 초과", "만료", "EXPIRED", "INVALID"]):
-                print(f"❌ [UID: {uid}] Invalid gift code or incorrect user/state info.")
+                print(f"❌ [UID: {uid}] Invalid gift code or incorrect user/state info.", flush=True)
                 return False
             else:
-                print(f"⚠️ [Attempt {attempt}/{max_retries}] Unknown popup message (UID: {uid})")
+                print(f"⚠️ [Attempt {attempt}/{max_retries}] Unknown popup message (UID: {uid})", flush=True)
 
         except Exception as e:
-            print(f"❌ [Attempt {attempt}/{max_retries}] Error occurred (UID: {uid}): {e}")
+            print(f"❌ [Attempt {attempt}/{max_retries}] Error occurred (UID: {uid}): {e}", flush=True)
 
         if attempt < max_retries:
             await asyncio.sleep(1)
@@ -188,7 +203,7 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
 
             while not queue.empty():
                 if cancel_mass_redeem:
-                    print(f"🛑 [Worker {worker_id}] 강제 중단 요청 감지.")
+                    print(f"🛑 [Worker {worker_id}] 강제 중단 요청 감지.", flush=True)
                     break
 
                 user = await queue.get()
@@ -215,7 +230,7 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
                                 )
                             )
                         except Exception as e:
-                            print(f"⚠️ 진행률 메시지 수정 실패: {e}")
+                            print(f"⚠️ 진행률 메시지 수정 실패: {e}", flush=True)
 
                 queue.task_done()
 
@@ -252,12 +267,22 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    print(f"🤖 Bot is logged in as {bot.user}")
+    print(f"\n==================================================", flush=True)
+    print(f"🤖 Bot is logged in as {bot.user}", flush=True)
+    
+    if sheet_users:
+        print(f"✅ Google Sheets DB is CONNECTED and READY!", flush=True)
+    else:
+        print(f"❌ Google Sheets DB 연동 실패!", flush=True)
+        print(f"👉 실패 상세 이유: {db_error_reason}", flush=True)
+        
+    print(f"==================================================\n", flush=True)
+
     try:
         synced = await bot.tree.sync()
-        print(f"⚡ Synced {len(synced)} command(s).")
+        print(f"⚡ Synced {len(synced)} command(s).", flush=True)
     except Exception as e:
-        print(f"❌ Command Sync Error: {e}")
+        print(f"❌ Command Sync Error: {e}", flush=True)
 
 # 1) /wr_register
 @bot.tree.command(name="wr_register", description="WOS 계정(UID 및 State 번호)을 등록하거나 수정합니다.")
@@ -386,7 +411,7 @@ async def clear_history_error(interaction: discord.Interaction, error: app_comma
         await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
 
 # 6) /wr_stop
-@bot.tree.command(name="stop", description="진행 중인 쿠폰 교환 작업을 강제 중단합니다.")
+@bot.tree.command(name="wr_stop", description="진행 중인 쿠폰 교환 작업을 강제 중단합니다.")
 async def stop_redeem(interaction: discord.Interaction):
     global cancel_mass_redeem
     cancel_mass_redeem = True
@@ -399,4 +424,4 @@ if __name__ == "__main__":
     if BOT_TOKEN:
         bot.run(BOT_TOKEN)
     else:
-        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.")
+        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.", flush=True)
