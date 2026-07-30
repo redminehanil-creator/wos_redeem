@@ -111,25 +111,33 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(
-    page, uid: str, server: int, gift_code: str, max_retries: int = 3
+    page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """단일 page 객체를 사용해 교환 시도"""
+    """단일 page 객체를 사용해 교환 시도 (타임아웃 및 에러로그 강화)"""
     for attempt in range(1, max_retries + 1):
         try:
+            # 1. 페이지 이동 타임아웃을 10초로 단축
             await page.goto(
-                "https://wos-giftcode.centurygame.com/", timeout=30000
+                "https://wos-giftcode.centurygame.com/", timeout=10000
             )
             await page.wait_for_timeout(1000)
 
-            await page.fill("input[placeholder='플레이어 ID']", str(uid))
-            await page.fill("input[placeholder='왕국']", str(server))
+            # 2. 입력 폼 채우기 (각 셀렉터 타임아웃 5초 설정)
+            await page.fill(
+                "input[placeholder='플레이어 ID']", str(uid), timeout=5000
+            )
+            await page.fill(
+                "input[placeholder='왕국']", str(server), timeout=5000
+            )
+            # 입력된 gift_code 값을 대소문자 변경 없이 원본 그대로 입력합니다.
             await page.fill(
                 "input[placeholder='교환 코드를 입력해 주세요']",
                 str(gift_code),
+                timeout=5000,
             )
 
             confirm_btn = page.locator("div.exchange_btn")
-            await confirm_btn.click()
+            await confirm_btn.click(timeout=5000)
             await page.wait_for_timeout(2000)
 
             content = await page.content()
@@ -142,19 +150,19 @@ async def execute_redeem_with_page(
                 return True
             else:
                 print(
-                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패 (UID: {uid}, 서버: {server})"
+                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid}, 서버: {server})"
                 )
 
         except Exception as e:
+            # 콘솔에 구체적인 요소를 찾지 못한 이유나 타임아웃 에러 출력
             print(
-                f"⚠️ [시도 {attempt}/{max_retries}] 입력 중 에러 (UID: {uid}): {e}"
+                f"❌ [시도 {attempt}/{max_retries}] 입력 중 에러 발생 (UID: {uid}): {e}"
             )
 
         if attempt < max_retries:
             await asyncio.sleep(1)
 
     return False
-
 
 async def process_mass_redeem(gift_code: str, target_channel):
     """구글 시트의 모든 유저 목록을 가져와 일괄 등록"""
