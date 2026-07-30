@@ -98,6 +98,11 @@ class WOSBot(commands.Bot):
 
 bot = WOSBot()
 
+@bot.event
+async def on_ready():
+    await bot.change_presence(status=discord.Status.online, activity=discord.Game("WOS Gift Code Redeem"))
+    print(f"✅ [{bot.user.name}] Discord online connection ready!")
+
 # ==========================================
 # 🔄 Playwright 자동 입력 로직 (한글/영문 완전 대응)
 # ==========================================
@@ -221,6 +226,9 @@ async def execute_redeem_with_page(
 
     return False
 
+# ==========================================
+# ⚡ 초고속 병렬 처리 대량 교환 로직
+# ==========================================
 async def process_mass_redeem(gift_code: str, target_channel):
     if not sheet_users or not sheet_codes:
         if target_channel:
@@ -266,10 +274,65 @@ async def process_mass_redeem(gift_code: str, target_channel):
     total_users = len(users_records)
     status_msg = None
     if target_channel:
-        status_msg = await target_channel.send(f"🚀 **New Gift Code Found!** [`{gift_code}`]\nStarting auto redemption for **{total_users} account(s)**...")
+        status_msg = await target_channel.send(f"🚀 **New Gift Code Found!** [`{gift_code}`]\nStarting parallel auto redemption for **{total_users} account(s)**...")
 
     success_count = 0
     fail_count = 0
+    processed_count = 0
+    lock = asyncio.Lock()
+
+    # ⚡ 3개 동시 처리를 위한 워커(Worker) 구조
+    CONCURRENCY_LIMIT = 3
+    queue = asyncio.Queue()
+
+    for user in users_records:
+        await queue.put(user)
+
+    async def worker(context):
+        nonlocal success_count, fail_count, processed_count
+        page = await context.new_page()
+
+        while not queue.empty():
+            try:
+                user = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            uid = user.get("uid")
+            server = user.get("server")
+
+            if not uid or not server:
+                async with lock:
+                    fail_count += 1
+                    processed_count += 1
+                queue.task_done()
+                continue
+
+            try:
+                is_success = await execute_redeem_with_page(page, str(uid), server, gift_code)
+            except Exception as e:
+                print(f"❌ Exception occurred (UID: {uid}): {e}")
+                is_success = False
+
+            async with lock:
+                if is_success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                processed_count += 1
+
+                # 5개 처리될 때마다 디스코드 진행상황 업데이트 (API 제한 방지)
+                if status_msg and (processed_count % 5 == 0 or processed_count == total_users):
+                    try:
+                        await status_msg.edit(
+                            content=f"🔄 **Processing Auto Redeem...** [`{gift_code}`] [{processed_count}/{total_users}]\n✅ Success: {success_count} | ❌ Failed: {fail_count}"
+                        )
+                    except Exception:
+                        pass
+
+            queue.task_done()
+
+        await page.close()
 
     try:
         async with async_playwright() as p:
@@ -278,36 +341,9 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-            for idx, user in enumerate(users_records, 1):
-                uid = user.get("uid")
-                server = user.get("server")
-
-                if not uid or not server:
-                    print(f"⚠️ [{idx}/{total_users}] Missing UID/State - Skipped: {user}")
-                    fail_count += 1
-                    continue
-
-                page = await context.new_page()
-                try:
-                    is_success = await execute_redeem_with_page(page, str(uid), server, gift_code)
-                except Exception as e:
-                    print(f"❌ [{idx}/{total_users}] Exception occurred (UID: {uid}): {e}")
-                    is_success = False
-                finally:
-                    await page.close()
-
-                if is_success:
-                    success_count += 1
-                else:
-                    fail_count += 1
-
-                if status_msg:
-                    try:
-                        await status_msg.edit(content=f"🔄 **Processing Auto Redeem...** [`{gift_code}`] [{idx}/{total_users}]\n✅ Success: {success_count} | ❌ Failed: {fail_count}")
-                    except Exception as edit_err:
-                        print(f"Message update error: {edit_err}")
-
-                await asyncio.sleep(0.5)
+            # 병렬 워커 동시 실행
+            workers = [asyncio.create_task(worker(context)) for _ in range(CONCURRENCY_LIMIT)]
+            await asyncio.gather(*workers)
 
             await browser.close()
     except Exception as pw_err:
