@@ -2,7 +2,7 @@ import asyncio
 import os
 import threading
 import datetime
-import json  # JSON 파싱용 모듈
+import json
 from flask import Flask
 import discord
 from discord import app_commands
@@ -24,25 +24,21 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
-# 별도 쓰레드에서 Flask 실행
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---------------------------------------------------------------------------
-# 2. 전역 변수 및 디스코드 / 구글 시트 세팅 (실시간 버퍼 지우기 flush=True 적용)
+# 2. 전역 변수 및 디스코드 / 구글 시트 세팅
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "WOS_Coupon_DB")
 GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "")
 
-# 🛑 대량 교환 강제 중단 스위치
 cancel_mass_redeem = False
 
-# 디스코드 봇 인텐트 설정
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 구글 시트 연동 객체 및 에러 메시지 변수
 sheet_users = None
 sheet_codes = None
 db_error_reason = ""
@@ -57,12 +53,9 @@ try:
         raise ValueError("GOOGLE_JSON 환경 변수가 설정되지 않았거나 비어있습니다.")
 
     env_str = GOOGLE_JSON_ENV.strip()
-    
-    # Render 환경 변수 앞뒤에 잘못 붙은 따옴표 제거
     if (env_str.startswith("'") and env_str.endswith("'")) or (env_str.startswith('"') and env_str.endswith('"')):
         env_str = env_str[1:-1].strip()
 
-    # JSON 텍스트 파싱 처리
     if env_str.startswith("{"):
         keyfile_dict = json.loads(env_str, strict=False)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(keyfile_dict, scope)
@@ -70,15 +63,16 @@ try:
         creds = ServiceAccountCredentials.from_json_keyfile_name(env_str, scope)
 
     client = gspread.authorize(creds)
-    
     doc = client.open(SPREADSHEET_NAME)
-    sheet_users = doc.worksheet("users")
+    
+    # 💡 탭 이름 고정 대신 첫 번째 탭('시트1')을 바로 자동 로드
+    sheet_users = doc.get_worksheet(0)
     
     try:
         sheet_codes = doc.worksheet("used_codes")
     except gspread.exceptions.WorksheetNotFound:
-        sheet_codes = doc.add_worksheet(title="used_codes", rows="1000", cols="2")
-        sheet_codes.append_row(["code", "used_at"])
+        sheet_codes = doc.add_worksheet(title="used_codes", rows="1000", cols="3")
+        sheet_codes.append_row(["code", "result_summary", "used_at"])
         
     print("✅ [DB Connect Test] Successfully connected to Google Sheets DB!", flush=True)
 
@@ -87,38 +81,30 @@ except Exception as e:
     print(f"\n❌ [DB 연동 실패 상세 원인]: {db_error_reason}\n", flush=True)
 
 # ---------------------------------------------------------------------------
-# 3. Playwright 핵심 교환 로직 (Render 최적화형)
+# 3. Playwright 핵심 교환 로직
 # ---------------------------------------------------------------------------
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """wait_for 타임아웃 오류를 방지하고 안정성을 극대화한 자동화 함수"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 쿠폰 웹사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1000)
 
-            # 2. Player ID 입력
             uid_input = page.locator("input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']").first
             await uid_input.fill(str(uid), timeout=10000)
 
-            # 3. State (서버) 입력
             server_input = page.locator("input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']").first
             await server_input.fill(str(server), timeout=10000)
 
-            # 4. Gift Code 입력
             code_input = page.locator("input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']").first
             await code_input.fill(str(gift_code), timeout=10000)
 
             await page.wait_for_timeout(300)
 
-            # 5. 교환 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
             await exchange_btn.click(timeout=10000)
 
-            # 6. 결과 팝업 대기
             await page.wait_for_timeout(2500)
 
-            # 7. 팝업 메시지 분석
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
             if await msg_element.count() > 0:
@@ -130,7 +116,6 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             popup_text_upper = popup_text_clean.upper()
             print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}", flush=True)
 
-            # 🎯 팝업 결과 정밀 판정
             if any(k in popup_text or k in popup_text_upper for k in ["REDEEMED", "CLAIM THE REWARDS IN YOUR MAIL", "교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "CONGRATULATIONS"]):
                 print(f"✅ [UID: {uid} / State: {server}] Redeem Success!", flush=True)
                 return True
@@ -258,9 +243,11 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
             )
         )
 
+        # 💡 used_codes 시트에 A: code, B: result_summary, C: used_at 에 맞춰 저장
         if sheet_codes:
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet_codes.append_row([gift_code, now_str])
+            summary_str = f"성공 {success_count}명 / 실패 {fail_count}명"
+            sheet_codes.append_row([gift_code, summary_str, now_str])
 
 # ---------------------------------------------------------------------------
 # 5. 디스코드 이벤트 및 슬래시 커맨드 모음 (wr_ 접두사 적용)
@@ -344,7 +331,7 @@ async def send_coupon(interaction: discord.Interaction, code: str):
     await interaction.response.defer(ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction))
 
-# 3) /wr_history
+# 3) /wr_history (result_summary 포함 출력)
 @bot.tree.command(name="wr_history", description="지금까지 발송 완료된 쿠폰 코드 목록을 조회합니다.")
 async def history(interaction: discord.Interaction):
     if not sheet_codes:
@@ -363,8 +350,13 @@ async def history(interaction: discord.Interaction):
 
     for r in recent_records:
         code = r.get("code", "Unknown")
+        summary = r.get("result_summary", "-")
         used_at = r.get("used_at", "Unknown Date")
-        embed.add_field(name=f"🎟️ {code}", value=f"🕒 발송 일시: {used_at}", inline=False)
+        embed.add_field(
+            name=f"🎟️ {code}", 
+            value=f"📊 결과: `{summary}`\n🕒 일시: {used_at}", 
+            inline=False
+        )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -393,7 +385,7 @@ async def delete_user_error(interaction: discord.Interaction, error: app_command
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
 
-# 5) /wr_clear_history
+# 5) /wr_clear_history (code, result_summary, used_at 구조 초기화)
 @bot.tree.command(name="wr_clear_history", description="[관리자] 발송된 쿠폰 내역(used_codes)을 모두 초기화합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_history(interaction: discord.Interaction):
@@ -402,7 +394,7 @@ async def clear_history(interaction: discord.Interaction):
         return
 
     sheet_codes.clear()
-    sheet_codes.append_row(["code", "used_at"])
+    sheet_codes.append_row(["code", "result_summary", "used_at"])
     await interaction.response.send_message("🧹 **쿠폰 발송 히스토리가 성공적으로 초기화되었습니다!**", ephemeral=True)
 
 @clear_history.error
