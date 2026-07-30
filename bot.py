@@ -27,21 +27,18 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---------------------------------------------------------------------------
-# 2. 전역 변수 및 디스코드 / 구글 시트 세팅 (안전 파싱 적용)
+# 2. 전역 변수 및 디스코드 / 구글 시트 세팅 (오류 디버깅 강화)
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "WOS_Coupon_DB")
-GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "google_key.json")
+GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "")
 
-# 🛑 대량 교환 강제 중단 스위치
 cancel_mass_redeem = False
 
-# 디스코드 봇 인텐트 설정
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 구글 시트 연동
 sheet_users = None
 sheet_codes = None
 
@@ -51,15 +48,20 @@ try:
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # 💡 Render 환경 변수가 JSON 텍스트 문자열인지, 파일 경로인지 자동 판별
-    env_str = GOOGLE_JSON_ENV.strip() if GOOGLE_JSON_ENV else ""
+    if not GOOGLE_JSON_ENV:
+        raise ValueError("GOOGLE_JSON 환경 변수가 설정되지 않았거나 비어있습니다.")
+
+    env_str = GOOGLE_JSON_ENV.strip()
     
+    # Render 환경변수 앞뒤에 잘못 붙은 따옴표 제거
+    if (env_str.startswith("'") and env_str.endswith("'")) or (env_str.startswith('"') and env_str.endswith('"')):
+        env_str = env_str[1:-1].strip()
+
+    # JSON 텍스트 파싱 처리
     if env_str.startswith("{"):
-        # 환경 변수에 JSON 내용 전체가 들어온 경우 (줄바꿈 이스케이프 안전 처리)
         keyfile_dict = json.loads(env_str, strict=False)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(keyfile_dict, scope)
     else:
-        # 파일 경로인 경우
         creds = ServiceAccountCredentials.from_json_keyfile_name(env_str, scope)
 
     client = gspread.authorize(creds)
@@ -74,8 +76,9 @@ try:
         sheet_codes.append_row(["code", "used_at"])
         
     print("✅ Successfully connected to Google Sheets DB!")
+
 except Exception as e:
-    print(f"❌ Failed to connect to Google Sheets DB: {e}")
+    print(f"\n❌ [DB 연동 실패 상세 원인]: {type(e).__name__} - {e}\n")
 
 # ---------------------------------------------------------------------------
 # 3. Playwright 핵심 교환 로직 (Render 최적화형)
