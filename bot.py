@@ -397,12 +397,11 @@ async def before_monitor():
     await bot.wait_until_ready()
 
 # ==========================================
-# 💬 영문 슬래시 커맨드 구역 (English Slash Commands)
+# 💬 영문 슬래시 커맨드 구역 (wr_ 접두사 적용)
 # ==========================================
 
-# 1. Register Account / Alt (E열 from 추가 버전)
-# 1. Register Account / Alt (E열 from 기록 완벽 보완)
-@bot.tree.command(name="register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
+# 1. Register Account / Alt (wr_register 적용 및 나에게만 보이기 ephemeral=True 적용)
+@bot.tree.command(name="wr_register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
 @app_commands.describe(uid="Player ID (Digits)", server="State / Kingdom Number (Digits)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
     if not sheet_users:
@@ -413,7 +412,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     username = interaction.user.display_name
     uid_str = str(uid).strip()
 
-    # 💡 디스코드 서버 이름 추출 (다중 안전장치)
+    # 디스코드 서버 이름 추출
     guild_name = "Direct Message"
     if interaction.guild:
         guild_name = interaction.guild.name
@@ -427,19 +426,20 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     raw_users = sheet_users.get_all_values()
 
     # 이미 존재(동일 UID)하는 행이 있는지 확인 후 수정
-    for row_idx, row in enumerate(raw_users[1:], start=2): # 2행부터 시작
+    for row_idx, row in enumerate(raw_users[1:], start=2):
         if len(row) >= 3 and row[2].strip() == uid_str:
             sheet_users.update_cell(row_idx, 1, discord_id)
             sheet_users.update_cell(row_idx, 2, username)
             sheet_users.update_cell(row_idx, 4, str(server))
-            sheet_users.update_cell(row_idx, 5, guild_name)  # 5번째(E열)에 서버명 저장
+            sheet_users.update_cell(row_idx, 5, guild_name)
             
             await interaction.response.send_message(
-                f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (From: **{guild_name}**)."
+                f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (From: **{guild_name}**).",
+                ephemeral=True
             )
             return
 
-    # 신규 등록 (E열 5번째 항목에 guild_name 확실히 포함)
+    # 신규 등록
     sheet_users.append_row([discord_id, username, uid_str, str(server), guild_name])
 
     embed = discord.Embed(
@@ -451,10 +451,10 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     embed.add_field(name="State (Kingdom)", value=f"#{server}", inline=True)
     embed.add_field(name="Server (From)", value=guild_name, inline=False)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
     
-# 2. Check My Accounts
-@bot.tree.command(name="myinfo", description="View all registered UIDs and State numbers for your account.")
+# 2. Check My Accounts (wr_myinfo)
+@bot.tree.command(name="wr_myinfo", description="View all registered UIDs and State numbers for your account.")
 async def my_info(interaction: discord.Interaction):
     if not sheet_users:
         await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
@@ -478,12 +478,12 @@ async def my_info(interaction: discord.Interaction):
         )
         for idx, (uid, server) in enumerate(my_accounts, 1):
             embed.add_field(name=f"Account #{idx}", value=f"UID: `{uid}` / State: `#{server}`", inline=False)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message("❌ No registered account found. Use `/register [UID] [State]` to register.")
+        await interaction.response.send_message("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
 
-# 3. Delete Specific UID
-@bot.tree.command(name="deleteinfo", description="Delete a specific registered UID from your account.")
+# 3. Delete Specific UID (wr_deleteinfo)
+@bot.tree.command(name="wr_deleteinfo", description="Delete a specific registered UID from your account.")
 @app_commands.describe(uid="Player UID to delete")
 async def delete_my_uid(interaction: discord.Interaction, uid: str):
     if not sheet_users:
@@ -504,12 +504,12 @@ async def delete_my_uid(interaction: discord.Interaction, uid: str):
 
     if row_to_delete:
         sheet_users.delete_rows(row_to_delete)
-        await interaction.response.send_message(f"🗑️ Successfully deleted UID `{uid_str}` from your account.")
+        await interaction.response.send_message(f"🗑️ Successfully deleted UID `{uid_str}` from your account.", ephemeral=True)
     else:
         await interaction.response.send_message(f"❌ UID `{uid_str}` was not found in your registered accounts.", ephemeral=True)
 
-# 4. View Gift Code History
-@bot.tree.command(name="history", description="Check recently processed gift code redemption history.")
+# 4. View Gift Code History (wr_history)
+@bot.tree.command(name="wr_history", description="Check recently processed gift code redemption history.")
 async def show_history(interaction: discord.Interaction):
     if not sheet_codes:
         await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
@@ -517,7 +517,7 @@ async def show_history(interaction: discord.Interaction):
 
     records = sheet_codes.get_all_records()
     if not records:
-        await interaction.response.send_message("📜 No gift code redemption history found yet.")
+        await interaction.response.send_message("📜 No gift code redemption history found yet.", ephemeral=True)
         return
 
     embed = discord.Embed(title="📜 Recent Gift Code Redemption History (Last 10)", color=0x9B59B6)
@@ -527,10 +527,10 @@ async def show_history(interaction: discord.Interaction):
             value=f"└ **Result:** {row.get('result_summary')}\n└ **Date:** {row.get('used_at')}",
             inline=False
         )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 5. Total Registered User Count
-@bot.tree.command(name="usercount", description="Check total registered accounts for auto redemption.")
+# 5. Total Registered User Count (wr_usercount)
+@bot.tree.command(name="wr_usercount", description="Check total registered accounts for auto redemption.")
 async def user_count(interaction: discord.Interaction):
     if not sheet_users:
         await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
@@ -544,18 +544,18 @@ async def user_count(interaction: discord.Interaction):
         description=f"Currently **{count} account(s)** are registered for automatic redemption.",
         color=0x1ABC9C
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 6. [Admin] Manual Redeem Code
-@bot.tree.command(name="sendcoupon", description="[Admin] Manually trigger gift code redemption for all registered accounts.")
+# 6. [Admin] Manual Redeem Code (wr_sendcoupon)
+@bot.tree.command(name="wr_sendcoupon", description="[Admin] Manually trigger gift code redemption for all registered accounts.")
 @app_commands.describe(gift_code="Gift code to redeem")
 @app_commands.checks.has_permissions(administrator=True)
 async def manual_redeem(interaction: discord.Interaction, gift_code: str):
-    await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...")
+    await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...", ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 7. [Admin] Delete Specific User Entirely
-@bot.tree.command(name="deleteuser", description="[Admin] Delete all registered data for a specific Discord user.")
+# 7. [Admin] Delete Specific User Entirely (wr_deleteuser)
+@bot.tree.command(name="wr_deleteuser", description="[Admin] Delete all registered data for a specific Discord user.")
 @app_commands.describe(target_user="Discord user to delete")
 @app_commands.checks.has_permissions(administrator=True)
 async def delete_user(interaction: discord.Interaction, target_user: discord.User):
@@ -584,7 +584,7 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
         description=f"Deleted all registered accounts (Total: {len(rows_to_delete)}) for {target_user.mention}.",
         color=0xE74C3C
     )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
 # 🚀 메인 실행
