@@ -89,72 +89,80 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 Playwright 기반 웹 자동 입력 로직
+# 🔄 Playwright 기반 웹 자동 입력 (재시도 로직 포함)
 # ==========================================
 async def execute_redeem_playwright(
-    uid: str, server: int, gift_code: str
+    uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """웹사이트 UI에 플레이어 ID, 왕국, 교환 코드를 입력하는 핵심 함수"""
-    async with async_playwright() as p:
-        browser = None
-        try:
-            # 헤드리스 크롬 실행 (Render 권한 문제 우회)
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-            page = await context.new_page()
+    """웹사이트 UI에 플레이어 ID, 왕국, 교환 코드를 입력 (실패 시 최대 max_retries회 재시도)"""
+    for attempt in range(1, max_retries + 1):
+        async with async_playwright() as p:
+            browser = None
+            try:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
 
-            # 교환 센터 접속
-            await page.goto(
-                "https://wos-giftcode.centurygame.com/", timeout=30000
-            )
-            await page.wait_for_timeout(1500)
+                # 교환 센터 접속
+                await page.goto(
+                    "https://wos-giftcode.centurygame.com/", timeout=30000
+                )
+                await page.wait_for_timeout(1500)
 
-            # 1. [플레이어 ID] 입력
-            id_input = page.locator(
-                "input[placeholder*='플레이어 ID'], input[placeholder*='Player ID']"
-            ).first
-            await id_input.fill(str(uid))
+                # 1. [플레이어 ID] 입력
+                id_input = page.locator(
+                    "input[placeholder*='플레이어 ID'], input[placeholder*='Player ID']"
+                ).first
+                await id_input.fill(str(uid))
 
-            # 2. [왕국] 입력
-            server_input = page.locator(
-                "input[placeholder*='왕국'], input[placeholder*='Kingdom']"
-            ).first
-            await server_input.fill(str(server))
+                # 2. [왕국] 입력
+                server_input = page.locator(
+                    "input[placeholder*='왕국'], input[placeholder*='Kingdom']"
+                ).first
+                await server_input.fill(str(server))
 
-            # 3. [교환 코드] 입력
-            code_input = page.locator(
-                "input[placeholder*='교환 코드'], input[placeholder*='Gift Code']"
-            ).first
-            await code_input.fill(str(gift_code))
+                # 3. [교환 코드] 입력
+                code_input = page.locator(
+                    "input[placeholder*='교환 코드'], input[placeholder*='Gift Code']"
+                ).first
+                await code_input.fill(str(gift_code))
 
-            # 4. [교환 확인] 버튼 클릭
-            confirm_btn = page.locator(
-                "button:has-text('교환 확인'), button:has-text('Confirm')"
-            ).first
-            await confirm_btn.click()
-            await page.wait_for_timeout(2500)
+                # 4. [교환 확인] 버튼 클릭
+                confirm_btn = page.locator(
+                    "button:has-text('교환 확인'), button:has-text('Confirm')"
+                ).first
+                await confirm_btn.click()
+                await page.wait_for_timeout(2500)
 
-            # 5. 결과 확인
-            content = await page.content()
+                # 5. 결과 확인
+                content = await page.content()
 
-            if (
-                "성공" in content
-                or "SUCCESS" in content.upper()
-                or "발송" in content
-            ):
-                return True
-            else:
-                print(f"❌ 교환 실패 (UID: {uid}, 서버: {server})")
-                return False
+                if (
+                    "성공" in content
+                    or "SUCCESS" in content.upper()
+                    or "발송" in content
+                ):
+                    return True
+                else:
+                    print(
+                        f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패 (UID: {uid}, 서버: {server})"
+                    )
 
-        except Exception as e:
-            print(f"⚠️ Playwright 입력 중 에러 발생 (UID: {uid}): {e}")
-            return False
-        finally:
-            if browser:
-                await browser.close()
+            except Exception as e:
+                print(
+                    f"⚠️ [시도 {attempt}/{max_retries}] 입력 중 에러 (UID: {uid}): {e}"
+                )
+            finally:
+                if browser:
+                    await browser.close()
+
+        # 재시도 전 1.5초 대기
+        if attempt < max_retries:
+            await asyncio.sleep(1.5)
+
+    return False
 
 
 async def process_mass_redeem(gift_code: str, target_channel):
@@ -193,7 +201,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     fail_count = 0
 
     for idx, (uid, server) in enumerate(rows, 1):
-        # Playwright 비동기 함수 직접 호출
+        # Playwright 비동기 함수 직접 호출 (실패 시 최대 3회 재시도 포함)
         is_success = await execute_redeem_playwright(uid, server, gift_code)
 
         if is_success:
