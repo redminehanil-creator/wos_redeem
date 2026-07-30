@@ -15,7 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
-# ⚡ 브라우저 자동 검사/설치
+# ⚡ 브라우저 자동 검사/설치 (1초 자동체크)
 # ==========================================
 try:
     print("🌐 Playwright 브라우저 검사 진행...")
@@ -99,7 +99,7 @@ class WOSBot(commands.Bot):
 bot = WOSBot()
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (2단계 정밀 처리)
+# 🔄 Playwright 자동 입력 로직 (최신 사이트 폼 반영)
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
     """간소화된 WOS 공식 교환 사이트 자동화 (UID + 서버 + 코드 직결 구조)"""
@@ -117,7 +117,7 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             server_input = page.locator("input[placeholder*='왕국'], input[placeholder*='서버'], input[placeholder*='Kingdom'], input[placeholder*='Server']").first
             await server_input.fill(str(server), timeout=5000)
 
-            # 4. 교환 코드 입력 (입력된 코드 원본 그대로 유지)
+            # 4. 교환 코드 입력
             code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code']").first
             await code_input.fill(str(gift_code), timeout=5000)
 
@@ -128,18 +128,20 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             # 6. 결과 팝업 대기 (2.5초)
             await page.wait_for_timeout(2500)
 
-            # 7. 팝업 텍스트 검사
+            # 7. 팝업 텍스트 검사 및 정밀 판정
             content = await page.content()
 
-            # 🎯 보내주신 팝업 스크린샷 문구와 100% 매칭
+            # A. 성공 케이스
             if any(k in content for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
                 print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
+            # B. 이미 수령한 케이스 (성공 처리)
             elif any(k in content for k in ["이미 수령", "다시 수령하실 수 없습니다", "ALREADY", "RECEIVED"]):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
+            # C. 명확한 실패 케이스 (존재하지 않는 코드 / 만료된 코드)
             elif any(k in content for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
                 print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
                 return False
@@ -460,7 +462,6 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
         await interaction.response.send_message(f"❌ {target_user.mention}님은 등록된 정보가 없습니다.", ephemeral=True)
         return
 
-    # 역순으로 삭제해야 행 번호가 꼬이지 않음
     for r in reversed(rows_to_delete):
         sheet_users.delete_rows(r)
 
