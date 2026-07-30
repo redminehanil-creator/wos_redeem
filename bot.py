@@ -13,7 +13,6 @@ from playwright.async_api import async_playwright
 # ==========================================
 # ⚙️ 실시간 로그 및 기본 설정 구역
 # ==========================================
-# Render 콘솔에서 print() 로그가 즉시 출력되도록 버퍼링 해제
 sys.stdout.reconfigure(line_buffering=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
@@ -89,76 +88,65 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 실제 HTML 기반 Playwright 자동 입력 (재시도 포함)
+# 🔄 Playwright 자동 입력 로직 (단일 Page 처리)
 # ==========================================
-async def execute_redeem_playwright(
-    uid: str, server: int, gift_code: str, max_retries: int = 3
+async def execute_redeem_with_page(
+    page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """웹사이트 HTML 요소에 직접 정확히 접근하는 교환 로직"""
+    """단일 page 객체를 사용해 교환을 시도 (실패 시 최대 max_retries회 재시도)"""
     for attempt in range(1, max_retries + 1):
-        async with async_playwright() as p:
-            browser = None
-            try:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-                page = await context.new_page()
+        try:
+            # 1. 교환 센터 접속
+            await page.goto(
+                "https://wos-giftcode.centurygame.com/", timeout=30000
+            )
+            await page.wait_for_timeout(1000)
 
-                # 1. 교환 센터 접속
-                await page.goto(
-                    "https://wos-giftcode.centurygame.com/", timeout=30000
-                )
-                await page.wait_for_timeout(1500)
+            # 2. [플레이어 ID] 입력
+            await page.fill("input[placeholder='플레이어 ID']", str(uid))
 
-                # 2. [플레이어 ID] 입력
-                await page.fill("input[placeholder='플레이어 ID']", str(uid))
+            # 3. [왕국] 입력
+            await page.fill("input[placeholder='왕국']", str(server))
 
-                # 3. [왕국] 입력
-                await page.fill("input[placeholder='왕국']", str(server))
+            # 4. [교환 코드] 입력 (원본 대소문자 유지)
+            await page.fill(
+                "input[placeholder='교환 코드를 입력해 주세요']",
+                str(gift_code),
+            )
 
-                # 4. [교환 코드] 입력
-                await page.fill(
-                    "input[placeholder='교환 코드를 입력해 주세요']",
-                    str(gift_code),
-                )
+            # 5. [교환 확인] 버튼 클릭 (div.exchange_btn 클릭)
+            confirm_btn = page.locator("div.exchange_btn")
+            await confirm_btn.click()
+            await page.wait_for_timeout(2000)
 
-                # 5. [교환 확인] 버튼 클릭 (div.exchange_btn 클릭)
-                confirm_btn = page.locator("div.exchange_btn")
-                await confirm_btn.click()
-                await page.wait_for_timeout(2500)
+            # 6. 결과 확인
+            content = await page.content()
 
-                # 6. 결과 확인
-                content = await page.content()
-
-                if (
-                    "성공" in content
-                    or "SUCCESS" in content.upper()
-                    or "발송" in content
-                ):
-                    return True
-                else:
-                    print(
-                        f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패 (UID: {uid}, 서버: {server})"
-                    )
-
-            except Exception as e:
+            if (
+                "성공" in content
+                or "SUCCESS" in content.upper()
+                or "발송" in content
+            ):
+                return True
+            else:
                 print(
-                    f"⚠️ [시도 {attempt}/{max_retries}] 입력 중 에러 (UID: {uid}): {e}"
+                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패 (UID: {uid}, 서버: {server})"
                 )
-            finally:
-                if browser:
-                    await browser.close()
+
+        except Exception as e:
+            print(
+                f"⚠️ [시도 {attempt}/{max_retries}] 입력 중 에러 (UID: {uid}): {e}"
+            )
 
         if attempt < max_retries:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1)
 
     return False
 
 
 async def process_mass_redeem(gift_code: str, target_channel):
-    """DB에 저장된 모든 유저에게 일괄 적용 및 진행 상황 리포트"""
-    gift_code = gift_code.upper().strip()
+    """단일 브라우저 세션을 생성하여 모든 유저에게 일괄 적용 (메모리 최적화)"""
+    gift_code = gift_code.strip()  # 대소문자 유지
 
     # 1. 이미 사용된 코드인지 DB 확인
     cursor.execute(
@@ -191,20 +179,34 @@ async def process_mass_redeem(gift_code: str, target_channel):
     success_count = 0
     fail_count = 0
 
-    for idx, (uid, server) in enumerate(rows, 1):
-        is_success = await execute_redeem_playwright(uid, server, gift_code)
+    # 💡 브라우저를 1개만 실행하고 Context를 재사용
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
 
-        if is_success:
-            success_count += 1
-        else:
-            fail_count += 1
+        for idx, (uid, server) in enumerate(rows, 1):
+            page = await context.new_page()
 
-        if status_msg and (idx % 3 == 0 or idx == len(rows)):
-            await status_msg.edit(
-                content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(rows)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
+            is_success = await execute_redeem_with_page(
+                page, uid, server, gift_code
             )
+            await page.close()  # 탭(페이지)만 깔끔히 닫기
 
-        await asyncio.sleep(1)
+            if is_success:
+                success_count += 1
+            else:
+                fail_count += 1
+
+            if status_msg and (idx % 3 == 0 or idx == len(rows)):
+                await status_msg.edit(
+                    content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(rows)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
+                )
+
+            await asyncio.sleep(0.5)
+
+        await browser.close()
 
     # 3. DB 기록
     summary = f"성공 {success_count}명 / 실패 {fail_count}명"
@@ -256,13 +258,14 @@ async def monitor_coupon_channel():
                 )
 
             for code in found_codes:
-                # URL이나 특정 단어 제외 필터링 (예: http, https, Redemption 등)
+                # URL이나 특정 단어 제외 필터링
                 if code.lower() in [
                     "http",
                     "https",
                     "redemption",
                     "until",
                     "valid",
+                    "page",
                 ]:
                     continue
 
@@ -273,6 +276,7 @@ async def monitor_coupon_channel():
                     await process_mass_redeem(code, report_channel)
     except Exception as e:
         print(f"모니터링 중 에러 발생: {e}")
+
 
 @monitor_coupon_channel.before_loop
 async def before_monitor():
@@ -422,7 +426,7 @@ async def delete_user(
     await interaction.response.send_message(embed=embed)
 
 
-# 6. [관리자 전용] 등록된 전체 유저 상세 명단 조회
+# 6. [관리자 전용] 등록된 전체 유저 상세 명단 조회 (버그 수정)
 @bot.tree.command(
     name="전체유저목록",
     description="[관리자] DB에 등록된 전체 유저 명단을 조회합니다.",
@@ -438,25 +442,29 @@ async def full_user_list(interaction: discord.Interaction):
         )
         return
 
-    embed = discord.Embed(
-        title=f"📋 등록 유저 명단 (총 {len(rows)}명)", color=0x34495E
-    )
-
     description_text = ""
+    is_first = True
+
     for idx, (discord_id, uid, server) in enumerate(rows, 1):
         description_text += (
             f"**{idx}.** <@{discord_id}> | UID: `{uid}` | 왕국: `{server}`번\n"
         )
 
         if idx % 15 == 0 or idx == len(rows):
-            embed.description = description_text
-            if idx <= 15:
+            # 분할 시에도 타이틀 유지
+            embed = discord.Embed(
+                title=f"📋 등록 유저 명단 (총 {len(rows)}명)",
+                description=description_text,
+                color=0x34495E,
+            )
+            if is_first:
                 await interaction.response.send_message(
                     embed=embed, ephemeral=True
                 )
+                is_first = False
             else:
                 await interaction.followup.send(embed=embed, ephemeral=True)
-            embed = discord.Embed(color=0x34495E)
+
             description_text = ""
 
 
