@@ -1,8 +1,6 @@
 import asyncio
 import os
 import threading
-import datetime
-import json
 from flask import Flask
 import discord
 from discord import app_commands
@@ -24,6 +22,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host="0.0.0.0", port=port)
 
+# 별도 쓰레드에서 Flask 실행
 threading.Thread(target=run_flask, daemon=True).start()
 
 # ---------------------------------------------------------------------------
@@ -31,54 +30,37 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "WOS_Coupon_DB")
-GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "")
+GOOGLE_JSON_PATH = os.environ.get("GOOGLE_JSON", "google_key.json")
 
-cancel_mass_redeem = False
-
+# 디스코드 봇 인텐트 설정
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# 구글 시트 연동
 sheet_users = None
 sheet_codes = None
-db_error_reason = ""
 
 try:
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-    
-    if not GOOGLE_JSON_ENV:
-        raise ValueError("GOOGLE_JSON 환경 변수가 설정되지 않았거나 비어있습니다.")
-
-    env_str = GOOGLE_JSON_ENV.strip()
-    if (env_str.startswith("'") and env_str.endswith("'")) or (env_str.startswith('"') and env_str.endswith('"')):
-        env_str = env_str[1:-1].strip()
-
-    if env_str.startswith("{"):
-        keyfile_dict = json.loads(env_str, strict=False)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(keyfile_dict, scope)
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(env_str, scope)
-
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON_PATH, scope)
     client = gspread.authorize(creds)
-    doc = client.open(SPREADSHEET_NAME)
     
-    # 💡 탭 이름 고정 대신 첫 번째 탭('시트1')을 바로 자동 로드
-    sheet_users = doc.get_worksheet(0)
+    doc = client.open(SPREADSHEET_NAME)
+    sheet_users = doc.worksheet("users")
     
     try:
         sheet_codes = doc.worksheet("used_codes")
     except gspread.exceptions.WorksheetNotFound:
-        sheet_codes = doc.add_worksheet(title="used_codes", rows="1000", cols="3")
-        sheet_codes.append_row(["code", "result_summary", "used_at"])
+        sheet_codes = doc.add_worksheet(title="used_codes", rows="1000", cols="2")
+        sheet_codes.append_row(["code", "used_at"])
         
-    print("✅ [DB Connect Test] Successfully connected to Google Sheets DB!", flush=True)
-
+    print("✅ Successfully connected to Google Sheets DB!")
 except Exception as e:
-    db_error_reason = f"{type(e).__name__} - {e}"
-    print(f"\n❌ [DB 연동 실패 상세 원인]: {db_error_reason}\n", flush=True)
+    print(f"❌ Failed to connect to Google Sheets DB: {e}")
 
 # ---------------------------------------------------------------------------
 # 3. Playwright 핵심 교환 로직
@@ -114,22 +96,22 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
 
             popup_text_clean = popup_text.strip()
             popup_text_upper = popup_text_clean.upper()
-            print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}", flush=True)
+            print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}")
 
             if any(k in popup_text or k in popup_text_upper for k in ["REDEEMED", "CLAIM THE REWARDS IN YOUR MAIL", "교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "CONGRATULATIONS"]):
-                print(f"✅ [UID: {uid} / State: {server}] Redeem Success!", flush=True)
+                print(f"✅ [UID: {uid} / State: {server}] Redeem Success!")
                 return True
             elif any(k in popup_text or k in popup_text_upper for k in ["ALREADY CLAIMED", "UNABLE TO CLAIM AGAIN", "이미 수령", "다시 수령", "RECEIVED", "USED"]):
-                print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)", flush=True)
+                print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)")
                 return True
             elif any(k in popup_text or k in popup_text_upper for k in ["GIFT CODE NOT FOUND", "CHARACTER INFO IS INCORRECT", "CASE-SENSITIVE", "존재하지 않습니다", "대소문자", "시간이 초과", "만료", "EXPIRED", "INVALID"]):
-                print(f"❌ [UID: {uid}] Invalid gift code or incorrect user/state info.", flush=True)
+                print(f"❌ [UID: {uid}] Invalid gift code or incorrect user/state info.")
                 return False
             else:
-                print(f"⚠️ [Attempt {attempt}/{max_retries}] Unknown popup message (UID: {uid})", flush=True)
+                print(f"⚠️ [Attempt {attempt}/{max_retries}] Unknown popup message (UID: {uid})")
 
         except Exception as e:
-            print(f"❌ [Attempt {attempt}/{max_retries}] Error occurred (UID: {uid}): {e}", flush=True)
+            print(f"❌ [Attempt {attempt}/{max_retries}] Error occurred (UID: {uid}): {e}")
 
         if attempt < max_retries:
             await asyncio.sleep(1)
@@ -137,12 +119,9 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
     return False
 
 # ---------------------------------------------------------------------------
-# 4. 병렬 큐(Queue) 처리 및 실시간 진행률 로직
+# 4. 병렬 큐(Queue) 처리 로직
 # ---------------------------------------------------------------------------
 async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
-    global cancel_mass_redeem
-    cancel_mass_redeem = False
-
     if not sheet_users:
         await interaction.followup.send("❌ Google Sheet DB가 연결되어 있지 않습니다.", ephemeral=True)
         return
@@ -161,11 +140,7 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
         return
 
     total_count = len(users)
-
-    progress_msg = await interaction.channel.send(
-        f"🚀 **쿠폰 대량 교환 시작!** (코드: `{gift_code}`)\n"
-        f"📊 **진행률**: `0 / {total_count}`명 (0%) | ⏳ 처리 중..."
-    )
+    await interaction.followup.send(f"🚀 **{total_count}명**의 계정에 대한 쿠폰 교환 작업을 시작합니다. (코드: `{gift_code}`)", ephemeral=True)
 
     queue = asyncio.Queue()
     for u in users:
@@ -173,7 +148,6 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
 
     success_count = 0
     fail_count = 0
-    processed_count = 0
     lock = asyncio.Lock()
 
     CONCURRENCY_LIMIT = 2
@@ -183,14 +157,9 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
         context = await browser.new_context()
 
         async def worker(worker_id, page):
-            nonlocal success_count, fail_count, processed_count
-            global cancel_mass_redeem
+            nonlocal success_count, fail_count
 
             while not queue.empty():
-                if cancel_mass_redeem:
-                    print(f"🛑 [Worker {worker_id}] 강제 중단 요청 감지.", flush=True)
-                    break
-
                 user = await queue.get()
                 uid = user["uid"]
                 server = user["server"]
@@ -198,24 +167,10 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
                 res = await execute_redeem_with_page(page, uid, server, gift_code)
 
                 async with lock:
-                    processed_count += 1
                     if res:
                         success_count += 1
                     else:
                         fail_count += 1
-
-                    if processed_count % 5 == 0 or processed_count == total_count:
-                        percentage = round((processed_count / total_count) * 100)
-                        try:
-                            await progress_msg.edit(
-                                content=(
-                                    f"🚀 **쿠폰 대량 교환 진행 중...** (코드: `{gift_code}`)\n"
-                                    f"📊 **진행률**: `{processed_count} / {total_count}`명 ({percentage}%)\n"
-                                    f"✅ 성공: `{success_count}`건 | ❌ 실패: `{fail_count}`건"
-                                )
-                            )
-                        except Exception as e:
-                            print(f"⚠️ 진행률 메시지 수정 실패: {e}", flush=True)
 
                 queue.task_done()
 
@@ -225,53 +180,26 @@ async def process_mass_redeem(gift_code: str, interaction: discord.Interaction):
         await asyncio.gather(*tasks)
         await browser.close()
 
-    if cancel_mass_redeem:
-        await progress_msg.edit(
-            content=(
-                f"🛑 **쿠폰 교환 작업이 중간에 중단되었습니다.**\n"
-                f"📊 **최종 진행 결과**: `{processed_count} / {total_count}`명 처리됨\n"
-                f"✅ 성공: `{success_count}`건 | ❌ 실패: `{fail_count}`건"
-            )
-        )
-    else:
-        await progress_msg.edit(
-            content=(
-                f"🎉 **쿠폰 대량 교환 완료!**\n"
-                f"- 입력 코드: `{gift_code}`\n"
-                f"- 총 계정: `{total_count}`명\n"
-                f"- ✅ 성공: `{success_count}`명 / ❌ 실패: `{fail_count}`명"
-            )
-        )
+    await interaction.channel.send(f"🎉 **쿠폰 대량 교환 작업 완료!**\n- 입력 코드: `{gift_code}`\n- 성공: {success_count}명 / 실패: {fail_count}명 (총 {total_count}명)")
 
-        # 💡 used_codes 시트에 A: code, B: result_summary, C: used_at 에 맞춰 저장
-        if sheet_codes:
-            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            summary_str = f"성공 {success_count}명 / 실패 {fail_count}명"
-            sheet_codes.append_row([gift_code, summary_str, now_str])
+    if sheet_codes:
+        import datetime
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sheet_codes.append_row([gift_code, now_str])
 
 # ---------------------------------------------------------------------------
-# 5. 디스코드 이벤트 및 슬래시 커맨드 모음 (wr_ 접두사 적용)
+# 5. 디스코드 이벤트 및 슬래시 커맨드 (wr_ 접두사 적용)
 # ---------------------------------------------------------------------------
 @bot.event
 async def on_ready():
-    print(f"\n==================================================", flush=True)
-    print(f"🤖 Bot is logged in as {bot.user}", flush=True)
-    
-    if sheet_users:
-        print(f"✅ Google Sheets DB is CONNECTED and READY!", flush=True)
-    else:
-        print(f"❌ Google Sheets DB 연동 실패!", flush=True)
-        print(f"👉 실패 상세 이유: {db_error_reason}", flush=True)
-        
-    print(f"==================================================\n", flush=True)
-
+    print(f"🤖 Bot is logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"⚡ Synced {len(synced)} command(s).", flush=True)
+        print(f"⚡ Synced {len(synced)} command(s).")
     except Exception as e:
-        print(f"❌ Command Sync Error: {e}", flush=True)
+        print(f"❌ Command Sync Error: {e}")
 
-# 1) /wr_register
+# 1) /wr_register 커맨드
 @bot.tree.command(name="wr_register", description="WOS 계정(UID 및 State 번호)을 등록하거나 수정합니다.")
 @app_commands.describe(uid="플레이어 ID (숫자)", server="왕국 / State 번호 (숫자)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
@@ -312,7 +240,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 2) /wr_sendcoupon
+# 2) /wr_sendcoupon 커맨드
 @bot.tree.command(name="wr_sendcoupon", description="모든 등록된 계정에 쿠폰 코드를 교환합니다.")
 @app_commands.describe(code="교환할 쿠폰 코드")
 async def send_coupon(interaction: discord.Interaction, code: str):
@@ -331,7 +259,7 @@ async def send_coupon(interaction: discord.Interaction, code: str):
     await interaction.response.defer(ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction))
 
-# 3) /wr_history (result_summary 포함 출력)
+# 3) /wr_history 커맨드
 @bot.tree.command(name="wr_history", description="지금까지 발송 완료된 쿠폰 코드 목록을 조회합니다.")
 async def history(interaction: discord.Interaction):
     if not sheet_codes:
@@ -350,17 +278,12 @@ async def history(interaction: discord.Interaction):
 
     for r in recent_records:
         code = r.get("code", "Unknown")
-        summary = r.get("result_summary", "-")
         used_at = r.get("used_at", "Unknown Date")
-        embed.add_field(
-            name=f"🎟️ {code}", 
-            value=f"📊 결과: `{summary}`\n🕒 일시: {used_at}", 
-            inline=False
-        )
+        embed.add_field(name=f"🎟️ {code}", value=f"🕒 발송 일시: {used_at}", inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 4) /wr_delete_user
+# 4) /wr_delete_user 커맨드 (관리자용)
 @bot.tree.command(name="wr_delete_user", description="[관리자] 특정 UID의 계정 정보를 시트에서 삭제합니다.")
 @app_commands.describe(uid="삭제할 플레이어 UID")
 @app_commands.checks.has_permissions(administrator=True)
@@ -385,7 +308,7 @@ async def delete_user_error(interaction: discord.Interaction, error: app_command
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
 
-# 5) /wr_clear_history (code, result_summary, used_at 구조 초기화)
+# 5) /wr_clear_history 커맨드 (관리자용)
 @bot.tree.command(name="wr_clear_history", description="[관리자] 발송된 쿠폰 내역(used_codes)을 모두 초기화합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_history(interaction: discord.Interaction):
@@ -394,20 +317,13 @@ async def clear_history(interaction: discord.Interaction):
         return
 
     sheet_codes.clear()
-    sheet_codes.append_row(["code", "result_summary", "used_at"])
+    sheet_codes.append_row(["code", "used_at"])
     await interaction.response.send_message("🧹 **쿠폰 발송 히스토리가 성공적으로 초기화되었습니다!**", ephemeral=True)
 
 @clear_history.error
 async def clear_history_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("🚫 이 커맨드는 디스코드 **관리자(Administrator)** 권한이 필요합니다.", ephemeral=True)
-
-# 6) /wr_stop
-@bot.tree.command(name="wr_stop", description="진행 중인 쿠폰 교환 작업을 강제 중단합니다.")
-async def stop_redeem(interaction: discord.Interaction):
-    global cancel_mass_redeem
-    cancel_mass_redeem = True
-    await interaction.response.send_message("🛑 **작업 강제 중단이 요청되었습니다.** 현재 처리 중인 계정까지만 완료 후 멈춥니다.", ephemeral=True)
 
 # ---------------------------------------------------------------------------
 # 6. 봇 구동
@@ -416,4 +332,4 @@ if __name__ == "__main__":
     if BOT_TOKEN:
         bot.run(BOT_TOKEN)
     else:
-        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.", flush=True)
+        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.")
