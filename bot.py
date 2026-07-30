@@ -99,7 +99,7 @@ class WOSBot(commands.Bot):
 bot = WOSBot()
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직
+# 🔄 Playwright 자동 입력 로직 (2단계 정밀 처리)
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
     """WOS 공식 교환 사이트 2단계(로그인 -> 교환) 정밀 자동화"""
@@ -135,8 +135,8 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             if any(k in content for k in ["성공", "발송", "완료", "Claimed", "SUCCESS", "Congratulations"]):
                 return True
             elif "ALREADY" in content_upper or "RECEIVED" in content_upper or "이미" in content:
-                print(f"ℹ️ [UID: {uid}] 이미 사용했거나 수령된 쿠폰입니다.")
-                return True  # 이미 받은 쿠폰도 성공 처리 원하시면 True
+                print(f"ℹ️ [UID: {uid}] 이미 수령된 쿠폰입니다. (성공 처리)")
+                return True
             else:
                 print(f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid})")
 
@@ -147,7 +147,7 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             await asyncio.sleep(1)
 
     return False
-    
+
 async def process_mass_redeem(gift_code: str, target_channel):
     if not sheet_users or not sheet_codes:
         if target_channel:
@@ -156,7 +156,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     gift_code = gift_code.strip()
 
-    # 1. 시트 데이터 로드 및 헤더 공백 자동 제거
+    # 1. 시트 데이터 로드
     try:
         raw_users = sheet_users.get_all_values()
         if len(raw_users) <= 1:
@@ -164,7 +164,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 await target_channel.send("❌ DB(구글시트)에 등록된 유저가 없어 교환을 진행하지 않습니다.")
             return
 
-        # 헤더명 양쪽 공백 제거
         headers = [str(h).strip().lower() for h in raw_users[0]]
         users_records = []
         
@@ -194,7 +193,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     total_users = len(users_records)
     status_msg = None
     if target_channel:
-        status_msg = await target_channel.send(f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{total_users}명** 자동 입력 작업을 시작합니다.")
+        status_msg = await target_channel.send(f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{total_users}개 계정** 자동 입력 작업을 시작합니다.")
 
     success_count = 0
     fail_count = 0
@@ -231,7 +230,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
                 if status_msg:
                     try:
-                        await status_msg.edit(content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{total_users}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명")
+                        await status_msg.edit(content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{total_users}]\n✅ 성공: {success_count}개 | ❌ 실패: {fail_count}개")
                     except Exception as edit_err:
                         print(f"메시지 수정 에러: {edit_err}")
 
@@ -242,7 +241,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
         print(f"❌ Playwright 치명적 에러: {pw_err}")
 
     # 3. 결과 기록
-    summary = f"성공 {success_count}명 / 실패 {fail_count}명"
+    summary = f"성공 {success_count}개 / 실패 {fail_count}개"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         sheet_codes.append_row([gift_code, summary, now_str])
@@ -252,13 +251,13 @@ async def process_mass_redeem(gift_code: str, target_channel):
     # 4. 결과 출력
     embed = discord.Embed(title="🎁 기프트코드 자동 교환 완료", color=0x00FF00)
     embed.add_field(name="기프트코드", value=f"`{gift_code}`", inline=False)
-    embed.add_field(name="결과 요약", value=f"총 대상: **{total_users}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명", inline=False)
+    embed.add_field(name="결과 요약", value=f"총 대상 계정: **{total_users}**개\n성공: **{success_count}**개 / 실패: **{fail_count}**개", inline=False)
 
     if target_channel:
         await target_channel.send(embed=embed)
 
 # ==========================================
-# 📡 모니터링 및 커맨드 구역
+# 📡 모니터링 구역
 # ==========================================
 @tasks.loop(seconds=60)
 async def monitor_coupon_channel():
@@ -288,8 +287,12 @@ async def monitor_coupon_channel():
 async def before_monitor():
     await bot.wait_until_ready()
 
-# 1. 유저 등록
-@bot.tree.command(name="등록", description="본인의 WOS UID와 서버 번호(왕국)를 등록합니다.")
+# ==========================================
+# 💬 슬래시 커맨드 구역 (다중 UID 지원)
+# ==========================================
+
+# 1. 유저/부계정 등록 (중복 가능 및 추가 등록)
+@bot.tree.command(name="등록", description="WOS UID와 서버 번호를 등록합니다. (부계정 추가 등록 가능)")
 @app_commands.describe(uid="플레이어 ID (숫자)", server="왕국 번호 (숫자)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
     if not sheet_users:
@@ -298,27 +301,37 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
 
     discord_id = str(interaction.user.id)
     username = interaction.user.display_name
+    uid_str = str(uid).strip()
 
-    cell = sheet_users.find(discord_id, in_column=1)
-    if cell:
-        sheet_users.update_cell(cell.row, 2, username)
-        sheet_users.update_cell(cell.row, 3, str(uid))
-        sheet_users.update_cell(cell.row, 4, server)
-    else:
-        sheet_users.append_row([discord_id, username, str(uid), server])
+    raw_users = sheet_users.get_all_values()
+    
+    # 이미 동일한 UID가 등록되어 있는지 확인
+    for row in raw_users[1:]:
+        if len(row) >= 3 and row[2].strip() == uid_str:
+            # 이미 존재하는 UID라면 해당 행 업데이트
+            cell = sheet_users.find(uid_str, in_column=3)
+            if cell:
+                sheet_users.update_cell(cell.row, 1, discord_id)
+                sheet_users.update_cell(cell.row, 2, username)
+                sheet_users.update_cell(cell.row, 4, server)
+                await interaction.response.send_message(f"🔄 **{username}**님의 UID `{uid_str}` 정보가 최신(왕국: {server}번)으로 수정되었습니다.")
+                return
+
+    # 신규 UID 추가 (한 유저가 여러 행 보유 가능)
+    sheet_users.append_row([discord_id, username, uid_str, server])
 
     embed = discord.Embed(
-        title="✅ 등록 완료",
-        description=f"{interaction.user.mention}(**{username}**)님의 정보가 구글 시트 DB에 저장되었습니다.",
+        title="✅ 계정 등록 완료",
+        description=f"{interaction.user.mention}(**{username}**)님의 계정이 추가 등록되었습니다.",
         color=0x3498DB
     )
-    embed.add_field(name="UID", value=uid, inline=True)
+    embed.add_field(name="UID", value=uid_str, inline=True)
     embed.add_field(name="왕국(서버)", value=f"{server}번", inline=True)
 
     await interaction.response.send_message(embed=embed)
 
-# 2. 내 정보
-@bot.tree.command(name="내정보", description="현재 등록되어 있는 내 정보를 확인합니다.")
+# 2. 내 정보 확인 (등록된 모든 계정 출력)
+@bot.tree.command(name="내정보", description="현재 내가 등록한 모든 UID 및 왕국 목록을 확인합니다.")
 async def my_info(interaction: discord.Interaction):
     if not sheet_users:
         await interaction.response.send_message("❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True)
@@ -327,22 +340,52 @@ async def my_info(interaction: discord.Interaction):
     discord_id = str(interaction.user.id)
     raw_users = sheet_users.get_all_values()
     
-    user_info = None
+    my_accounts = []
     if len(raw_users) > 1:
         for row in raw_users[1:]:
             if len(row) > 0 and str(row[0]).strip() == discord_id:
-                user_info = row
+                uid = row[2] if len(row) > 2 else '미기록'
+                server = row[3] if len(row) > 3 else '미기록'
+                my_accounts.append((uid, server))
+
+    if my_accounts:
+        embed = discord.Embed(
+            title=f"ℹ️ {interaction.user.display_name}님의 등록 계정 목록 (총 {len(my_accounts)}개)",
+            color=0x3498DB
+        )
+        for idx, (uid, server) in enumerate(my_accounts, 1):
+            embed.add_field(name=f"계정 #{idx}", value=f"UID: `{uid}` / 왕국: `{server}`번", inline=False)
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("❌ 등록된 정보가 없습니다. `/등록 [UID] [왕국번호]` 명령어로 계정을 등록해주세요.")
+
+# 3. 내 특정 UID 삭제
+@bot.tree.command(name="내정보삭제", description="본인이 등록한 특정 UID 계정을 삭제합니다.")
+@app_commands.describe(uid="삭제할 플레이어 UID")
+async def delete_my_uid(interaction: discord.Interaction, uid: str):
+    if not sheet_users:
+        await interaction.response.send_message("❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True)
+        return
+
+    discord_id = str(interaction.user.id)
+    uid_str = str(uid).strip()
+
+    raw_users = sheet_users.get_all_values()
+    row_to_delete = None
+
+    if len(raw_users) > 1:
+        for idx, row in enumerate(raw_users[1:], 2): # 1행은 헤더이므로 index 2부터 시작
+            if len(row) >= 3 and str(row[0]).strip() == discord_id and str(row[2]).strip() == uid_str:
+                row_to_delete = idx
                 break
 
-    if user_info:
-        username = user_info[1] if len(user_info) > 1 else '미기록'
-        uid = user_info[2] if len(user_info) > 2 else '미기록'
-        server = user_info[3] if len(user_info) > 3 else '미기록'
-        await interaction.response.send_message(f"ℹ️ **등록 정보**: `{username}` | UID `{uid}` / 왕국 `{server}`번")
+    if row_to_delete:
+        sheet_users.delete_rows(row_to_delete)
+        await interaction.response.send_message(f"🗑️ 본인의 UID `{uid_str}` 계정 정보를 성공적으로 삭제했습니다.")
     else:
-        await interaction.response.send_message("❌ 등록된 정보가 없습니다. `/등록 [UID] [왕국번호]` 명령어로 등록해주세요.")
+        await interaction.response.send_message(f"❌ 본인 계정 중 UID `{uid_str}` 정보를 찾을 수 없습니다.", ephemeral=True)
 
-# 3. 히스토리
+# 4. 히스토리
 @bot.tree.command(name="히스토리", description="최근 봇이 처리한 기프트코드 교환 내역을 확인합니다.")
 async def show_history(interaction: discord.Interaction):
     if not sheet_codes:
@@ -363,8 +406,8 @@ async def show_history(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed)
 
-# 4. 유저목록 요약
-@bot.tree.command(name="유저목록", description="현재 자동 교환에 등록된 총 유저 수 현황을 확인합니다.")
+# 5. 총 등록 계정 수
+@bot.tree.command(name="유저목록", description="현재 자동 교환에 등록된 총 계정 수 현황을 확인합니다.")
 async def user_count(interaction: discord.Interaction):
     if not sheet_users:
         await interaction.response.send_message("❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True)
@@ -375,12 +418,12 @@ async def user_count(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="👥 자동 교환 등록 현황",
-        description=f"현재 총 **{count}명**의 플레이어가 기프트코드 자동 교환에 등록되어 있습니다.",
+        description=f"현재 총 **{count}개**의 계정이 기프트코드 자동 교환에 등록되어 있습니다.",
         color=0x1ABC9C
     )
     await interaction.response.send_message(embed=embed)
 
-# 5. 수동 쿠폰 발송
+# 6. [관리자] 수동 쿠폰 발송
 @bot.tree.command(name="쿠폰발송", description="[관리자] 기프트코드를 입력하여 전체 유저에게 일괄 등록합니다.")
 @app_commands.describe(gift_code="교환할 기프트코드")
 @app_commands.checks.has_permissions(administrator=True)
@@ -388,8 +431,8 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(f"⏳ 기프트코드(`{gift_code}`) 수동 발송 작업을 시작합니다...")
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 6. 유저삭제
-@bot.tree.command(name="유저삭제", description="[관리자] 특정 유저의 등록 정보를 삭제합니다.")
+# 7. [관리자] 특정 유저 전체 삭제
+@bot.tree.command(name="유저삭제", description="[관리자] 특정 유저의 모든 등록 정보를 삭제합니다.")
 @app_commands.describe(target_user="삭제할 디스코드 유저")
 @app_commands.checks.has_permissions(administrator=True)
 async def delete_user(interaction: discord.Interaction, target_user: discord.User):
@@ -398,15 +441,25 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
         return
 
     discord_id = str(target_user.id)
-    cell = sheet_users.find(discord_id, in_column=1)
-    if not cell:
+    raw_users = sheet_users.get_all_values()
+    
+    rows_to_delete = []
+    if len(raw_users) > 1:
+        for idx, row in enumerate(raw_users[1:], 2):
+            if len(row) > 0 and str(row[0]).strip() == discord_id:
+                rows_to_delete.append(idx)
+
+    if not rows_to_delete:
         await interaction.response.send_message(f"❌ {target_user.mention}님은 등록된 정보가 없습니다.", ephemeral=True)
         return
 
-    sheet_users.delete_rows(cell.row)
+    # 역순으로 삭제해야 행 번호가 꼬이지 않음
+    for r in reversed(rows_to_delete):
+        sheet_users.delete_rows(r)
+
     embed = discord.Embed(
         title="🗑️ 유저 정보 삭제 완료",
-        description=f"{target_user.mention}님의 등록 정보를 구글 시트에서 삭제했습니다.",
+        description=f"{target_user.mention}님의 등록 정보(총 {len(rows_to_delete)}개)를 삭제했습니다.",
         color=0xE74C3C
     )
     await interaction.response.send_message(embed=embed)
