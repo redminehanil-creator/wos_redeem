@@ -107,36 +107,40 @@ async def on_ready():
     print(f"✅ [{bot.user.name}] Discord online connection ready!")
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (한글/영문 완전 대응)
+# 🔄 Playwright 자동 입력 로직 (타임아웃 방지 강화)
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
+    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화 (타임아웃 강화)"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 사이트 접속
-            await page.goto(
-                "https://wos-giftcode.centurygame.com/",
-                timeout=15000,
-                wait_until="domcontentloaded",
-            )
-            await page.wait_for_timeout(1000)
+            # 1. 사이트 접속 (2번째 시도부터는 reload로 확실히 다시 읽어옴)
+            if attempt == 1:
+                await page.goto(
+                    "https://wos-giftcode.centurygame.com/",
+                    timeout=20000,
+                    wait_until="commit",
+                )
+            else:
+                await page.reload(timeout=20000, wait_until="commit")
 
-            # 2. 플레이어 ID 입력 (Player ID / 플레이어 ID)
+            await page.wait_for_timeout(1500)
+
+            # 2. 플레이어 ID 입력 (타임아웃 15초로 상향)
             uid_input = page.locator(
                 "input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']"
             ).first
-            await uid_input.wait_for(state="visible", timeout=10000)
+            await uid_input.wait_for(state="attached", timeout=15000)
             await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 왕국(서버) 입력 (State / 왕국)
+            # 3. 왕국(서버) 입력
             server_input = page.locator(
                 "input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
             ).first
             await server_input.fill(str(server), timeout=5000)
 
-            # 4. 교환 코드 입력 (Enter Gift Code / 교환 코드를 입력해 주세요)
+            # 4. 교환 코드 입력
             code_input = page.locator(
                 "input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']"
             ).first
@@ -144,11 +148,11 @@ async def execute_redeem_with_page(
 
             await page.wait_for_timeout(500)
 
-            # 5. 교환 확인 버튼 클릭 (div.exchange_btn)
+            # 5. 교환 확인 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
             await exchange_btn.click(timeout=5000)
 
-            # 6. 결과 팝업 대기 (2.5초)
+            # 6. 결과 팝업 대기
             await page.wait_for_timeout(2500)
 
             # 7. 모달 팝업 내부 메시지 탐색
@@ -164,9 +168,6 @@ async def execute_redeem_with_page(
             popup_text_upper = popup_text_clean.upper()
             print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}")
 
-            # -----------------------------------------------------------
-            # 🎯 팝업 메시지 정밀 판정 (영문/한글 100% 매칭)
-            # -----------------------------------------------------------
             # A. 성공 케이스
             if any(
                 k in popup_text or k in popup_text_upper
@@ -198,7 +199,7 @@ async def execute_redeem_with_page(
                 print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)")
                 return True
 
-            # C. 명확한 실패 케이스 (코드 없음 / 만료 / 유저 정보 틀림)
+            # C. 명확한 실패 케이스
             elif any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -225,7 +226,7 @@ async def execute_redeem_with_page(
             )
 
         if attempt < max_retries:
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
 
     return False
 
@@ -234,7 +235,7 @@ async def execute_redeem_with_page(
 # ==========================================
 async def process_mass_redeem(gift_code: str, target_channel):
     global cancel_mass_redeem
-    cancel_mass_redeem = False  # 작업 시작 시 중단 플래그 리셋
+    cancel_mass_redeem = False
 
     if not sheet_users or not sheet_codes:
         if target_channel:
@@ -287,7 +288,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
     processed_count = 0
     lock = asyncio.Lock()
 
-    # ⚡ 3개 동시 처리를 위한 워커(Worker) 구조
     CONCURRENCY_LIMIT = 3
     queue = asyncio.Queue()
 
@@ -301,7 +301,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
         page = await context.new_page()
 
         while not queue.empty():
-            # 🛑 강제 중단 요청 감지 시 워커 즉시 종료
             if cancel_mass_redeem:
                 print("🛑 강제 중단 요청 감지. 작업을 멈춥니다.")
                 break
@@ -334,7 +333,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                     fail_count += 1
                 processed_count += 1
 
-                # 5개 처리될 때마다 디스코드 진행상황 업데이트
                 if status_msg and (processed_count % 5 == 0 or processed_count == total_users):
                     try:
                         await status_msg.edit(
@@ -354,7 +352,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-            # 병렬 워커 동시 실행
             workers = [asyncio.create_task(worker(context)) for _ in range(CONCURRENCY_LIMIT)]
             await asyncio.gather(*workers)
 
@@ -362,7 +359,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 3. 중단 여부에 따른 최종 결과 처리
+    # 3. 결과 처리
     if cancel_mass_redeem:
         if target_channel:
             await target_channel.send(
@@ -372,7 +369,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 f"- 성공: **{success_count}** | 실패: **{fail_count}**"
             )
     else:
-        # 정상 완료 시 기록 작성
         summary = f"Success {success_count} / Failed {fail_count}"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -605,7 +601,7 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 8. [신규] 대량 교환 강제 중단 커맨드
+# 8. 대량 교환 강제 중단 커맨드
 @bot.tree.command(name="wr_stop", description="진행 중인 대량 쿠폰 교환 작업을 강제 중단합니다.")
 async def stop_redeem(interaction: discord.Interaction):
     global cancel_mass_redeem
