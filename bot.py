@@ -28,9 +28,11 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ---------------------------------------------------------------------------
 # 2. 전역 변수 및 디스코드 / 구글 시트 세팅
 # ---------------------------------------------------------------------------
+import json  # 맨 위 import 구문에 json이 없으면 자동 추가
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "WOS_Coupon_DB")
-GOOGLE_JSON_PATH = os.environ.get("GOOGLE_JSON", "google_key.json")
+GOOGLE_JSON_ENV = os.environ.get("GOOGLE_JSON", "google_key.json")
 
 # 🛑 대량 교환 강제 중단 스위치
 cancel_mass_redeem = False
@@ -49,7 +51,16 @@ try:
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON_PATH, scope)
+    
+    # 💡 환경 변수가 JSON 텍스트 형태인지, 파일 경로 형태인지 자동 판단
+    if GOOGLE_JSON_ENV.strip().startswith("{"):
+        # JSON 문자열 그대로 들어왔을 때 처리
+        keyfile_dict = json.loads(GOOGLE_JSON_ENV)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(keyfile_dict, scope)
+    else:
+        # 파일 경로로 들어왔을 때 처리
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_JSON_ENV, scope)
+
     client = gspread.authorize(creds)
     
     doc = client.open(SPREADSHEET_NAME)
@@ -64,7 +75,7 @@ try:
     print("✅ Successfully connected to Google Sheets DB!")
 except Exception as e:
     print(f"❌ Failed to connect to Google Sheets DB: {e}")
-
+    
 # ---------------------------------------------------------------------------
 # 3. Playwright 핵심 교환 로직 (Render 최적화형)
 # ---------------------------------------------------------------------------
