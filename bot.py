@@ -14,6 +14,17 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
+# ⚡ 1초 브라우저 자동 체크/설치 로직 (배포속도 극대화)
+# ==========================================
+try:
+    import subprocess
+
+    print("🌐 Playwright 브라우저 검사 및 필요시 자동 설치 진행...")
+    subprocess.run(["python", "-m", "playwright", "install"], check=False)
+except Exception as e:
+    print(f"⚠️ 브라우저 설치 과정 스킵/경고: {e}")
+
+# ==========================================
 # ⚙️ 기본 설정 구역
 # ==========================================
 sys.stdout.reconfigure(line_buffering=True)
@@ -108,7 +119,7 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (타임아웃 강화)
+# 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
@@ -147,7 +158,7 @@ async def execute_redeem_with_page(
                 return True
             else:
                 print(
-                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패/응답 미확인 (UID: {uid}, 서버: {server})"
+                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid}, 서버: {server})"
                 )
 
         except Exception as e:
@@ -174,10 +185,8 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     # 1. 시트 데이터 가져오기
     try:
-        users_records = sheet_users.get_all_records()  # 등록된 유저 목록
-        used_codes_records = (
-            sheet_codes.get_all_records()
-        )  # 처리된 코드 내역
+        users_records = sheet_users.get_all_records()
+        used_codes_records = sheet_codes.get_all_records()
     except Exception as e:
         print(f"❌ 구글 시트 데이터 로드 실패: {e}")
         if target_channel:
@@ -219,7 +228,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-            # 💡 [수정 완료] users_records 변수를 순회합니다.
             for idx, user in enumerate(users_records, 1):
                 uid = user.get("uid")
                 server = user.get("server")
@@ -230,7 +238,9 @@ async def process_mass_redeem(gift_code: str, target_channel):
                         page, str(uid), server, gift_code
                     )
                 except Exception as e:
-                    print(f"❌ [{idx}/{total_users}] 작업 중 예외 발생: {e}")
+                    print(
+                        f"❌ [{idx}/{total_users}] 작업 중 예외 발생: {e}"
+                    )
                     is_success = False
                 finally:
                     await page.close()
@@ -240,7 +250,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 else:
                     fail_count += 1
 
-                # 💡 실시간 디스코드 진행상황 업데이트
+                # 실시간 디스코드 진행상황 업데이트
                 if status_msg:
                     try:
                         await status_msg.edit(
@@ -342,17 +352,14 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
         return
 
     discord_id = str(interaction.user.id)
-    username = interaction.user.display_name  # 디스코드 프로필 이름(닉네임)
+    username = interaction.user.display_name
 
-    # 구글 시트에 기존 등록 유저 확인
     cell = sheet_users.find(discord_id, in_column=1)
     if cell:
-        # 기존 유저 정보 업데이트 (A: discord_id, B: username, C: uid, D: server)
         sheet_users.update_cell(cell.row, 2, username)
         sheet_users.update_cell(cell.row, 3, str(uid))
         sheet_users.update_cell(cell.row, 4, server)
     else:
-        # 신규 유저 추가 [discord_id, username, uid, server]
         sheet_users.append_row([discord_id, username, str(uid), server])
 
     embed = discord.Embed(
