@@ -43,7 +43,7 @@ try:
     if GOOGLE_JSON_RAW:
         creds_dict = json.loads(GOOGLE_JSON_RAW)
 
-        # 💡 [핵심 해결] private_key 내부의 \n 문자열을 실제 줄바꿈 문자로 변환
+        # private_key 내부의 \n 문자열을 실제 줄바꿈 문자로 변환
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace(
                 "\\n", "\n"
@@ -108,28 +108,25 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직
+# 🔄 Playwright 자동 입력 로직 (타임아웃 강화)
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """단일 page 객체를 사용해 교환 시도 (타임아웃 및 에러로그 강화)"""
+    """단일 page 객체를 사용해 교환 시도"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 페이지 이동 타임아웃을 10초로 단축
             await page.goto(
                 "https://wos-giftcode.centurygame.com/", timeout=10000
             )
             await page.wait_for_timeout(1000)
 
-            # 2. 입력 폼 채우기 (각 셀렉터 타임아웃 5초 설정)
             await page.fill(
                 "input[placeholder='플레이어 ID']", str(uid), timeout=5000
             )
             await page.fill(
                 "input[placeholder='왕국']", str(server), timeout=5000
             )
-            # 입력된 gift_code 값을 대소문자 변경 없이 원본 그대로 입력합니다.
             await page.fill(
                 "input[placeholder='교환 코드를 입력해 주세요']",
                 str(gift_code),
@@ -150,11 +147,10 @@ async def execute_redeem_with_page(
                 return True
             else:
                 print(
-                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid}, 서버: {server})"
+                    f"⚠️ [시도 {attempt}/{max_retries}] 교환 실패/응답 미확인 (UID: {uid}, 서버: {server})"
                 )
 
         except Exception as e:
-            # 콘솔에 구체적인 요소를 찾지 못한 이유나 타임아웃 에러 출력
             print(
                 f"❌ [시도 {attempt}/{max_retries}] 입력 중 에러 발생 (UID: {uid}): {e}"
             )
@@ -163,6 +159,7 @@ async def execute_redeem_with_page(
             await asyncio.sleep(1)
 
     return False
+
 
 async def process_mass_redeem(gift_code: str, target_channel):
     """구글 시트의 모든 유저 목록을 가져와 일괄 등록"""
@@ -299,7 +296,7 @@ async def before_monitor():
 
 
 # ==========================================
-# 💬 슬래시 커맨드 (구글 시트 연동)
+# 💬 슬래시 커맨드 (프로필 이름 추가 기록)
 # ==========================================
 
 
@@ -317,20 +314,22 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
         return
 
     discord_id = str(interaction.user.id)
+    username = interaction.user.display_name  # 디스코드 프로필 이름(닉네임)
 
     # 구글 시트에 기존 등록 유저 확인
     cell = sheet_users.find(discord_id, in_column=1)
     if cell:
-        # 기존 등록 유저 업데이트
-        sheet_users.update_cell(cell.row, 2, str(uid))
-        sheet_users.update_cell(cell.row, 3, server)
+        # 기존 유저 정보 업데이트 (A: discord_id, B: username, C: uid, D: server)
+        sheet_users.update_cell(cell.row, 2, username)
+        sheet_users.update_cell(cell.row, 3, str(uid))
+        sheet_users.update_cell(cell.row, 4, server)
     else:
-        # 신규 유저 추가
-        sheet_users.append_row([discord_id, str(uid), server])
+        # 신규 유저 추가 [discord_id, username, uid, server]
+        sheet_users.append_row([discord_id, username, str(uid), server])
 
     embed = discord.Embed(
         title="✅ 등록 완료",
-        description=f"{interaction.user.mention}님의 정보가 성공적으로 구글 시트 DB에 저장되었습니다.",
+        description=f"{interaction.user.mention}(**{username}**)님의 정보가 구글 시트 DB에 저장되었습니다.",
         color=0x3498DB,
     )
     embed.add_field(name="UID", value=uid, inline=True)
@@ -359,7 +358,7 @@ async def my_info(interaction: discord.Interaction):
 
     if user_info:
         await interaction.response.send_message(
-            f"ℹ️ **등록 정보**: UID `{user_info.get('uid')}` / 왕국 `{user_info.get('server')}`번"
+            f"ℹ️ **등록 정보**: `{user_info.get('username', '미기록')}` | UID `{user_info.get('uid')}` / 왕국 `{user_info.get('server')}`번"
         )
     else:
         await interaction.response.send_message(
@@ -485,12 +484,11 @@ async def full_user_list(interaction: discord.Interaction):
 
     for idx, user in enumerate(records, 1):
         discord_id = user.get("discord_id")
+        username = user.get("username", "이름없음")
         uid = user.get("uid")
         server = user.get("server")
 
-        description_text += (
-            f"**{idx}.** <@{discord_id}> | UID: `{uid}` | 왕국: `{server}`번\n"
-        )
+        description_text += f"**{idx}.** {username} (<@{discord_id}>) | UID: `{uid}` | 왕국: `{server}`번\n"
 
         if idx % 15 == 0 or idx == len(records):
             embed = discord.Embed(
@@ -526,7 +524,7 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
 
 
 # ==========================================
-# ⚠️ 에러 핸들러 (상세 에러 콘솔 출력 기능 추가)
+# ⚠️ 에러 핸들러
 # ==========================================
 @register.error
 @my_info.error
@@ -538,7 +536,6 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
 async def global_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
-    # 콘솔 로그에 원인 감추지 않고 상세히 출력
     print(
         f"❌ [{interaction.command.name}] 실행 중 상세 오류 발생: {error}"
     )
@@ -549,7 +546,6 @@ async def global_command_error(
             ephemeral=True,
         )
     else:
-        # 처리 중 에러 안내
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 "❌ 명령어 처리 중 에러가 발생했습니다. Render 콘솔 로그를 확인해 주세요.",
