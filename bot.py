@@ -15,7 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
-# ⚡ 브라우저 자동 검사/설치
+# ⚡ 브라우저 자동 검사/설치 (1초 자동체크)
 # ==========================================
 try:
     print("🌐 Playwright 브라우저 검사 진행...")
@@ -99,18 +99,25 @@ class WOSBot(commands.Bot):
 bot = WOSBot()
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (안정 복구 버젼)
+# 🔄 Playwright 자동 입력 로직 (안정성 보완)
 # ==========================================
-async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """안정적인 타임아웃 보장 WOS 교환 자동화"""
+async def execute_redeem_with_page(
+    page, uid: str, server: int, gift_code: str, max_retries: int = 2
+) -> bool:
+    """제공된 팝업 HTML(modal_content, msg) 구조 완벽 감지 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
-            await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
+            await page.goto(
+                "https://wos-giftcode.centurygame.com/",
+                timeout=15000,
+                wait_until="domcontentloaded",
+            )
             await page.wait_for_timeout(1000)
 
-            # 2. 플레이어 ID 입력 (여유로운 5초 타임아웃)
+            # 2. 플레이어 ID 입력 (요소가 보일 때까지 대기 추가로 타임아웃 방지)
             uid_input = page.locator("input[placeholder='플레이어 ID']").first
+            await uid_input.wait_for(state="visible", timeout=10000)
             await uid_input.fill(str(uid), timeout=5000)
 
             # 3. 왕국(서버) 입력
@@ -118,7 +125,9 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             await server_input.fill(str(server), timeout=5000)
 
             # 4. 교환 코드 입력
-            code_input = page.locator("input[placeholder='교환 코드를 입력해 주세요']").first
+            code_input = page.locator(
+                "input[placeholder='교환 코드를 입력해 주세요']"
+            ).first
             await code_input.fill(str(gift_code), timeout=5000)
 
             await page.wait_for_timeout(500)
@@ -130,10 +139,10 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             # 6. 결과 팝업 대기 (2.5초)
             await page.wait_for_timeout(2500)
 
-            # 7. 모달 팝업 내부 메시지 태그(<p class="msg">) 탐색
+            # 7. 모달 팝업 내부 메시지 태그(<p class="msg">) 정밀 탐색
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
-            
+
             if await msg_element.count() > 0:
                 popup_text = await msg_element.text_content()
             else:
@@ -142,17 +151,32 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             print(f"🔍 [UID: {uid}] 감지된 팝업 문구: {popup_text.strip()}")
 
             # -----------------------------------------------------------
-            # 🎯 팝업 메시지 정밀 판정
+            # 🎯 팝업 메시지 정밀 판정 (성공 / 이미 수령 / 오류 / 만료)
             # -----------------------------------------------------------
-            if any(k in popup_text for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
+            if any(
+                k in popup_text
+                for k in [
+                    "교환 성공",
+                    "우편에서 보상",
+                    "보상을 확인하세요",
+                    "SUCCESS",
+                    "Claimed",
+                ]
+            ):
                 print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
-            elif any(k in popup_text for k in ["이미 수령", "다시 수령", "ALREADY", "RECEIVED"]):
+            elif any(
+                k in popup_text
+                for k in ["이미 수령", "다시 수령", "ALREADY", "RECEIVED"]
+            ):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
-            elif any(k in popup_text for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
+            elif any(
+                k in popup_text
+                for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]
+            ):
                 print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
                 return False
 
@@ -160,7 +184,9 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
                 print(f"⚠️ [시도 {attempt}/{max_retries}] 알 수 없는 팝업 문구 (UID: {uid})")
 
         except Exception as e:
-            print(f"❌ [시도 {attempt}/{max_retries}] 입력 진행 중 에러 발생 (UID: {uid}): {e}")
+            print(
+                f"❌ [시도 {attempt}/{max_retries}] 입력 진행 중 에러 발생 (UID: {uid}): {e}"
+            )
 
         if attempt < max_retries:
             await asyncio.sleep(1)
@@ -185,7 +211,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
         headers = [str(h).strip().lower() for h in raw_users[0]]
         users_records = []
-        
+
         for row in raw_users[1:]:
             if not row or not any(row):
                 continue
@@ -321,7 +347,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     uid_str = str(uid).strip()
 
     raw_users = sheet_users.get_all_values()
-    
+
     for row in raw_users[1:]:
         if len(row) >= 3 and row[2].strip() == uid_str:
             cell = sheet_users.find(uid_str, in_column=3)
@@ -352,7 +378,7 @@ async def my_info(interaction: discord.Interaction):
 
     discord_id = str(interaction.user.id)
     raw_users = sheet_users.get_all_values()
-    
+
     my_accounts = []
     if len(raw_users) > 1:
         for row in raw_users[1:]:
@@ -450,7 +476,7 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
 
     discord_id = str(target_user.id)
     raw_users = sheet_users.get_all_values()
-    
+
     rows_to_delete = []
     if len(raw_users) > 1:
         for idx, row in enumerate(raw_users[1:], 2):
