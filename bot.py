@@ -109,46 +109,46 @@ async def on_ready():
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
+    """페이지 재활용 최적화 및 wait_for 제거형 자동화 로직"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 사이트 접속
+            # 1. 사이트 접속 (domcontentloaded)
             await page.goto(
                 "https://wos-giftcode.centurygame.com/",
                 timeout=15000,
                 wait_until="domcontentloaded",
             )
+            # 페이지 인착을 위한 1초 대기 (CPU 병목 방지)
             await page.wait_for_timeout(1000)
 
-            # 2. 플레이어 ID 입력 (Player ID / 플레이어 ID)
+            # 2. 플레이어 ID 입력 (wait_for 지우고 fill로 바로 입력)
             uid_input = page.locator(
                 "input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']"
             ).first
-            await uid_input.wait_for(state="visible", timeout=10000)
-            await uid_input.fill(str(uid), timeout=5000)
+            await uid_input.fill(str(uid), timeout=10000)
 
-            # 3. 왕국(서버) 입력 (State / 왕국)
+            # 3. 왕국(서버) 입력
             server_input = page.locator(
                 "input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
             ).first
-            await server_input.fill(str(server), timeout=5000)
+            await server_input.fill(str(server), timeout=10000)
 
-            # 4. 교환 코드 입력 (Enter Gift Code / 교환 코드를 입력해 주세요)
+            # 4. 교환 코드 입력
             code_input = page.locator(
                 "input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']"
             ).first
-            await code_input.fill(str(gift_code), timeout=5000)
+            await code_input.fill(str(gift_code), timeout=10000)
 
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(300)
 
-            # 5. 교환 확인 버튼 클릭 (div.exchange_btn)
+            # 5. 교환 확인 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
-            await exchange_btn.click(timeout=5000)
+            await exchange_btn.click(timeout=10000)
 
             # 6. 결과 팝업 대기 (2.5초)
             await page.wait_for_timeout(2500)
 
-            # 7. 모달 팝업 내부 메시지 탐색
+            # 7. 모달 팝업 메시지 탐색
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
 
@@ -161,10 +161,7 @@ async def execute_redeem_with_page(
             popup_text_upper = popup_text_clean.upper()
             print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}")
 
-            # -----------------------------------------------------------
-            # 🎯 팝업 메시지 정밀 판정 (영문/한글 100% 매칭)
-            # -----------------------------------------------------------
-            # A. 성공 케이스
+            # 🎯 팝업 판정
             if any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -180,7 +177,6 @@ async def execute_redeem_with_page(
                 print(f"✅ [UID: {uid} / State: {server}] Redeem Success!")
                 return True
 
-            # B. 이미 수령한 케이스 (성공으로 간주)
             elif any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -195,7 +191,6 @@ async def execute_redeem_with_page(
                 print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)")
                 return True
 
-            # C. 명확한 실패 케이스 (코드 없음 / 만료 / 유저 정보 틀림)
             elif any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -225,7 +220,7 @@ async def execute_redeem_with_page(
             await asyncio.sleep(1)
 
     return False
-
+    
 # ==========================================
 # ⚡ 초고속 병렬 처리 대량 교환 로직
 # ==========================================
@@ -282,7 +277,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     lock = asyncio.Lock()
 
     # ⚡ 3개 동시 처리를 위한 워커(Worker) 구조
-    CONCURRENCY_LIMIT = 3
+    CONCURRENCY_LIMIT = 2
     queue = asyncio.Queue()
 
     for user in users_records:
