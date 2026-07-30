@@ -1,24 +1,60 @@
 import asyncio
+import json
 import os
 import re
-import sqlite3
 import sys
+from datetime import datetime
 from threading import Thread
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
-# ⚙️ 실시간 로그 및 기본 설정 구역
+# ⚙️ 기본 설정 구역
 # ==========================================
 sys.stdout.reconfigure(line_buffering=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
-
 MONITOR_CHANNEL_ID = 973162050333327390  # 모니터링할 채널 ID
 REPORT_CHANNEL_ID = 1532160917943484626  # 결과를 보고받을 채널 ID
+
+# 구글 시트 이름
+SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "wos_bot_db")
+
+# 환경변수에 저장된 GOOGLE_JSON 파싱 (또나 로클 service_account.json 파일 사용)
+GOOGLE_JSON_RAW = os.environ.get("GOOGLE_JSON", "")
+
+# ==========================================
+# 📊 구글 시트(Google Sheets) DB 세팅
+# ==========================================
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
+
+try:
+    if GOOGLE_JSON_RAW:
+        creds_dict = json.loads(GOOGLE_JSON_RAW)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            creds_dict, scope
+        )
+    else:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            "service_account.json", scope
+        )
+
+    gc = gspread.authorize(creds)
+    sh = gc.open(SPREADSHEET_NAME)
+
+    sheet_users = sh.sheet1  # 첫번째 시트 (users)
+    sheet_codes = sh.worksheet("used_codes")  # 두번째 시트 (used_codes)
+    print("✅ 구글 시트 데이터베이스 연동 성공!")
+except Exception as e:
+    print(f"❌ 구글 시트 연동 실패: {e}")
 
 # ==========================================
 # 🌐 Render Web Service 유지용 Flask 웹 서버
@@ -40,32 +76,6 @@ def keep_alive():
     t = Thread(target=run_web)
     t.daemon = True
     t.start()
-
-
-# ==========================================
-# 🗄️ 데이터베이스 세팅 (SQLite)
-# ==========================================
-conn = sqlite3.connect("wos_users.db")
-cursor = conn.cursor()
-
-# 유저 정보 테이블
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    discord_id TEXT PRIMARY KEY,
-    uid TEXT NOT NULL,
-    server INTEGER NOT NULL
-)
-""")
-
-# 사용된 기프트코드 기록 테이블
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS used_codes (
-    code TEXT PRIMARY KEY,
-    result_summary TEXT DEFAULT '처리 완료',
-    used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-""")
-conn.commit()
 
 
 # ==========================================
@@ -93,33 +103,25 @@ bot = WOSBot()
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """단일 page 객체를 사용해 교환을 시도 (실패 시 최대 max_retries회 재시도)"""
+    """단일 page 객체를 사용해 교환 시도"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 교환 센터 접속
             await page.goto(
                 "https://wos-giftcode.centurygame.com/", timeout=30000
             )
             await page.wait_for_timeout(1000)
 
-            # 2. [플레이어 ID] 입력
             await page.fill("input[placeholder='플레이어 ID']", str(uid))
-
-            # 3. [왕국] 입력
             await page.fill("input[placeholder='왕국']", str(server))
-
-            # 4. [교환 코드] 입력 (원본 대소문자 유지)
             await page.fill(
                 "input[placeholder='교환 코드를 입력해 주세요']",
                 str(gift_code),
             )
 
-            # 5. [교환 확인] 버튼 클릭 (div.exchange_btn 클릭)
             confirm_btn = page.locator("div.exchange_btn")
             await confirm_btn.click()
             await page.wait_for_timeout(2000)
 
-            # 6. 결과 확인
             content = await page.content()
 
             if (
@@ -145,14 +147,12 @@ async def execute_redeem_with_page(
 
 
 async def process_mass_redeem(gift_code: str, target_channel):
-    """단일 브라우저 세션을 생성하여 모든 유저에게 일괄 적용 (메모리 최적화)"""
-    gift_code = gift_code.strip()  # 대소문자 유지
+    """구글 시트의 모든 유저 목록을 가져와 일괄 등록"""
+    gift_code = gift_code.strip()
 
-    # 1. 이미 사용된 코드인지 DB 확인
-    cursor.execute(
-        "SELECT code FROM used_codes WHERE code = ?", (gift_code,)
-    )
-    if cursor.fetchone():
+    # 1. 이미 사용된 코드인지 구글 시트 확인
+    used_records = sheet_codes.get_all_records()
+    if any(row.get("code") == gift_code for row in used_records):
         if target_channel:
             await target_channel.send(
                 f"⚠️ `{gift_code}` 코드는 이미 처리된 히스토리가 있습니다."
@@ -160,63 +160,58 @@ async def process_mass_redeem(gift_code: str, target_channel):
         return
 
     # 2. 유저 목록 조회
-    cursor.execute("SELECT uid, server FROM users")
-    rows = cursor.fetchall()
+    users_records = sheet_users.get_all_records()
 
-    if not rows:
+    if not users_records:
         if target_channel:
             await target_channel.send(
-                "❌ DB에 등록된 유저가 없어 교환을 진행하지 않습니다."
+                "❌ DB(구글시트)에 등록된 유저가 없어 교환을 진행하지 않습니다."
             )
         return
 
     status_msg = None
     if target_channel:
         status_msg = await target_channel.send(
-            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{len(rows)}명** 자동 입력 작업을 시작합니다."
+            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{len(users_records)}명** 자동 입력 작업을 시작합니다."
         )
 
     success_count = 0
     fail_count = 0
 
-    # 💡 브라우저를 1개만 실행하고 Context를 재사용
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        for idx, (uid, server) in enumerate(rows, 1):
-            page = await context.new_page()
+        for idx, user in enumerate(users_records, 1):
+            uid = user.get("uid")
+            server = user.get("server")
 
+            page = await context.new_page()
             is_success = await execute_redeem_with_page(
-                page, uid, server, gift_code
+                page, str(uid), server, gift_code
             )
-            await page.close()  # 탭(페이지)만 깔끔히 닫기
+            await page.close()
 
             if is_success:
                 success_count += 1
             else:
                 fail_count += 1
 
-            if status_msg and (idx % 3 == 0 or idx == len(rows)):
+            if status_msg and (idx % 3 == 0 or idx == len(users_records)):
                 await status_msg.edit(
-                    content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(rows)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
+                    content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(users_records)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
                 )
 
             await asyncio.sleep(0.5)
 
         await browser.close()
 
-    # 3. DB 기록
+    # 3. 구글 시트 히스토리에 기록
     summary = f"성공 {success_count}명 / 실패 {fail_count}명"
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO used_codes (code, result_summary) VALUES (?, ?)
-    """,
-        (gift_code, summary),
-    )
-    conn.commit()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sheet_codes.append_row([gift_code, summary, now_str])
 
     # 4. 결과 출력
     embed = discord.Embed(
@@ -225,7 +220,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     embed.add_field(name="기프트코드", value=f"`{gift_code}`", inline=False)
     embed.add_field(
         name="결과 요약",
-        value=f"총 대상: **{len(rows)}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명",
+        value=f"총 대상: **{len(users_records)}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명",
         inline=False,
     )
 
@@ -234,7 +229,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
 
 # ==========================================
-# 📡 디스코드 채널 모니터링 (자동 감지)
+# 📡 디스코드 채널 모니터링
 # ==========================================
 @tasks.loop(seconds=60)
 async def monitor_coupon_channel():
@@ -246,19 +241,16 @@ async def monitor_coupon_channel():
 
     try:
         async for message in channel.history(limit=5):
-            # 1. "Code: XXXX" 형태 우선 추출 (대소문자 구별)
             found_codes = re.findall(
                 r"Code:\s*([a-zA-Z0-9]{6,20})", message.content, re.IGNORECASE
             )
 
-            # 2. 패턴 매칭이 안 된 경우 일반 단어 추출 (예비용)
             if not found_codes:
                 found_codes = re.findall(
                     r"\b[a-zA-Z0-9]{6,20}\b", message.content
                 )
 
             for code in found_codes:
-                # URL이나 특정 단어 제외 필터링
                 if code.lower() in [
                     "http",
                     "https",
@@ -269,10 +261,8 @@ async def monitor_coupon_channel():
                 ]:
                     continue
 
-                cursor.execute(
-                    "SELECT code FROM used_codes WHERE code = ?", (code,)
-                )
-                if not cursor.fetchone():
+                used_records = sheet_codes.get_all_records()
+                if not any(row.get("code") == code for row in used_records):
                     await process_mass_redeem(code, report_channel)
     except Exception as e:
         print(f"모니터링 중 에러 발생: {e}")
@@ -284,7 +274,7 @@ async def before_monitor():
 
 
 # ==========================================
-# 💬 슬래시 커맨드 (사용자 & 관리자)
+# 💬 슬래시 커맨드 (구글 시트 연동)
 # ==========================================
 
 
@@ -296,17 +286,19 @@ async def before_monitor():
 async def register(interaction: discord.Interaction, uid: str, server: int):
     discord_id = str(interaction.user.id)
 
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO users (discord_id, uid, server) VALUES (?, ?, ?)
-    """,
-        (discord_id, uid, server),
-    )
-    conn.commit()
+    # 구글 시트에 기존 등록 유저 확인
+    cell = sheet_users.find(discord_id, in_column=1)
+    if cell:
+        # 기존 등록 유저 업데이트
+        sheet_users.update_cell(cell.row, 2, str(uid))
+        sheet_users.update_cell(cell.row, 3, server)
+    else:
+        # 신규 유저 추가
+        sheet_users.append_row([discord_id, str(uid), server])
 
     embed = discord.Embed(
         title="✅ 등록 완료",
-        description=f"{interaction.user.mention}님의 정보가 성공적으로 저장되었습니다.",
+        description=f"{interaction.user.mention}님의 정보가 성공적으로 구글 시트 DB에 저장되었습니다.",
         color=0x3498DB,
     )
     embed.add_field(name="UID", value=uid, inline=True)
@@ -322,14 +314,15 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
 async def my_info(interaction: discord.Interaction):
     discord_id = str(interaction.user.id)
 
-    cursor.execute(
-        "SELECT uid, server FROM users WHERE discord_id = ?", (discord_id,)
+    records = sheet_users.get_all_records()
+    user_info = next(
+        (row for row in records if str(row.get("discord_id")) == discord_id),
+        None,
     )
-    row = cursor.fetchone()
 
-    if row:
+    if user_info:
         await interaction.response.send_message(
-            f"ℹ️ **등록 정보**: UID `{row[0]}` / 왕국 `{row[1]}`번"
+            f"ℹ️ **등록 정보**: UID `{user_info.get('uid')}` / 왕국 `{user_info.get('server')}`번"
         )
     else:
         await interaction.response.send_message(
@@ -343,15 +336,9 @@ async def my_info(interaction: discord.Interaction):
     description="최근 봇이 처리한 기프트코드 교환 내역을 확인합니다.",
 )
 async def show_history(interaction: discord.Interaction):
-    cursor.execute("""
-        SELECT code, result_summary, used_at 
-        FROM used_codes 
-        ORDER BY used_at DESC 
-        LIMIT 10
-    """)
-    rows = cursor.fetchall()
+    records = sheet_codes.get_all_records()
 
-    if not rows:
+    if not records:
         await interaction.response.send_message(
             "📜 아직 교환 처리된 기프트코드 내역이 없습니다."
         )
@@ -362,11 +349,11 @@ async def show_history(interaction: discord.Interaction):
         color=0x9B59B6,
     )
 
-    for code, summary, used_at in rows:
-        date_str = str(used_at).split(".")[0]
+    # 최근 10개 역순 추출
+    for row in reversed(records[-10:]):
         embed.add_field(
-            name=f"🎁 코드: `{code}`",
-            value=f"└ **결과:** {summary}\n└ **일시:** {date_str}",
+            name=f"🎁 코드: `{row.get('code')}`",
+            value=f"└ **결과:** {row.get('result_summary')}\n└ **일시:** {row.get('used_at')}",
             inline=False,
         )
 
@@ -379,12 +366,11 @@ async def show_history(interaction: discord.Interaction):
     description="현재 자동 교환에 등록된 총 유저 수 현황을 확인합니다.",
 )
 async def user_count(interaction: discord.Interaction):
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
+    records = sheet_users.get_all_records()
 
     embed = discord.Embed(
         title="👥 자동 교환 등록 현황",
-        description=f"현재 총 **{count}명**의 플레이어가 기프트코드 자동 교환에 등록되어 있습니다.",
+        description=f"현재 총 **{len(records)}명**의 플레이어가 기프트코드 자동 교환에 등록되어 있습니다.",
         color=0x1ABC9C,
     )
     await interaction.response.send_message(embed=embed)
@@ -401,42 +387,34 @@ async def delete_user(
 ):
     discord_id = str(target_user.id)
 
-    cursor.execute(
-        "SELECT uid FROM users WHERE discord_id = ?", (discord_id,)
-    )
-    row = cursor.fetchone()
-
-    if not row:
+    cell = sheet_users.find(discord_id, in_column=1)
+    if not cell:
         await interaction.response.send_message(
             f"❌ {target_user.mention}님은 등록된 정보가 없습니다.",
             ephemeral=True,
         )
         return
 
-    cursor.execute(
-        "DELETE FROM users WHERE discord_id = ?", (discord_id,)
-    )
-    conn.commit()
+    sheet_users.delete_rows(cell.row)
 
     embed = discord.Embed(
         title="🗑️ 유저 정보 삭제 완료",
-        description=f"{target_user.mention}님의 등록 정보(UID: `{row[0]}`)를 DB에서 삭제했습니다.",
+        description=f"{target_user.mention}님의 등록 정보를 구글 시트에서 삭제했습니다.",
         color=0xE74C3C,
     )
     await interaction.response.send_message(embed=embed)
 
 
-# 6. [관리자 전용] 등록된 전체 유저 상세 명단 조회 (버그 수정)
+# 6. [관리자 전용] 전체 유저 상세 명단 조회
 @bot.tree.command(
     name="전체유저목록",
     description="[관리자] DB에 등록된 전체 유저 명단을 조회합니다.",
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def full_user_list(interaction: discord.Interaction):
-    cursor.execute("SELECT discord_id, uid, server FROM users")
-    rows = cursor.fetchall()
+    records = sheet_users.get_all_records()
 
-    if not rows:
+    if not records:
         await interaction.response.send_message(
             "📋 현재 DB에 등록된 유저가 없습니다.", ephemeral=True
         )
@@ -445,15 +423,18 @@ async def full_user_list(interaction: discord.Interaction):
     description_text = ""
     is_first = True
 
-    for idx, (discord_id, uid, server) in enumerate(rows, 1):
+    for idx, user in enumerate(records, 1):
+        discord_id = user.get("discord_id")
+        uid = user.get("uid")
+        server = user.get("server")
+
         description_text += (
             f"**{idx}.** <@{discord_id}> | UID: `{uid}` | 왕국: `{server}`번\n"
         )
 
-        if idx % 15 == 0 or idx == len(rows):
-            # 분할 시에도 타이틀 유지
+        if idx % 15 == 0 or idx == len(records):
             embed = discord.Embed(
-                title=f"📋 등록 유저 명단 (총 {len(rows)}명)",
+                title=f"📋 등록 유저 명단 (총 {len(records)}명)",
                 description=description_text,
                 color=0x34495E,
             )
@@ -485,7 +466,7 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
 
 
 # ==========================================
-# ⚠️ 관리자 권한 예외 처리 에러 핸들러
+# ⚠️ 관리자 권한 예외 처리
 # ==========================================
 @delete_user.error
 @full_user_list.error
