@@ -401,6 +401,7 @@ async def before_monitor():
 # ==========================================
 
 # 1. Register Account / Alt (E열 from 추가 버전)
+# 1. Register Account / Alt (E열 from 기록 완벽 보완)
 @bot.tree.command(name="register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
 @app_commands.describe(uid="Player ID (Digits)", server="State / Kingdom Number (Digits)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
@@ -411,26 +412,35 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     discord_id = str(interaction.user.id)
     username = interaction.user.display_name
     uid_str = str(uid).strip()
-    
-    # 💡 명령어가 실행된 디스코드 서버 이름 가져오기
-    guild_name = interaction.guild.name if interaction.guild else "DM"
+
+    # 💡 디스코드 서버 이름 추출 (다중 안전장치)
+    guild_name = "Direct Message"
+    if interaction.guild:
+        guild_name = interaction.guild.name
+    elif interaction.guild_id:
+        guild_obj = bot.get_guild(interaction.guild_id)
+        if guild_obj:
+            guild_name = guild_obj.name
+        else:
+            guild_name = f"Guild_{interaction.guild_id}"
 
     raw_users = sheet_users.get_all_values()
 
-    # 이미 존재하는 UID라면 해당 행 업데이트 (server, from 정보 최신화)
-    for row in raw_users[1:]:
+    # 이미 존재(동일 UID)하는 행이 있는지 확인 후 수정
+    for row_idx, row in enumerate(raw_users[1:], start=2): # 2행부터 시작
         if len(row) >= 3 and row[2].strip() == uid_str:
-            cell = sheet_users.find(uid_str, in_column=3)
-            if cell:
-                sheet_users.update_cell(cell.row, 1, discord_id)
-                sheet_users.update_cell(cell.row, 2, username)
-                sheet_users.update_cell(cell.row, 4, server)
-                sheet_users.update_cell(cell.row, 5, guild_name)  # E열(5번째 열)에 서버명 업데이트
-                await interaction.response.send_message(f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (Server: {guild_name}).")
-                return
+            sheet_users.update_cell(row_idx, 1, discord_id)
+            sheet_users.update_cell(row_idx, 2, username)
+            sheet_users.update_cell(row_idx, 4, str(server))
+            sheet_users.update_cell(row_idx, 5, guild_name)  # 5번째(E열)에 서버명 저장
+            
+            await interaction.response.send_message(
+                f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (From: **{guild_name}**)."
+            )
+            return
 
-    # 신규 UID 추가 (E열 5번째 항목에 guild_name 추가)
-    sheet_users.append_row([discord_id, username, uid_str, server, guild_name])
+    # 신규 등록 (E열 5번째 항목에 guild_name 확실히 포함)
+    sheet_users.append_row([discord_id, username, uid_str, str(server), guild_name])
 
     embed = discord.Embed(
         title="✅ Account Registration Complete",
@@ -439,10 +449,10 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     )
     embed.add_field(name="UID", value=uid_str, inline=True)
     embed.add_field(name="State (Kingdom)", value=f"#{server}", inline=True)
-    embed.add_field(name="Registered From", value=guild_name, inline=False)
+    embed.add_field(name="Server (From)", value=guild_name, inline=False)
 
     await interaction.response.send_message(embed=embed)
-
+    
 # 2. Check My Accounts
 @bot.tree.command(name="myinfo", description="View all registered UIDs and State numbers for your account.")
 async def my_info(interaction: discord.Interaction):
