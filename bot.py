@@ -102,34 +102,42 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
+    """WOS 공식 교환 페이지 입력 자동화 (타임아웃 및 요소 선택 강화)"""
     for attempt in range(1, max_retries + 1):
         try:
-            await page.goto("https://wos-giftcode.centurygame.com/", timeout=10000)
+            # 1. 페이지 접속 (타임아웃 15초)
+            await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1000)
 
-            await page.fill("input[placeholder='플레이어 ID']", str(uid), timeout=5000)
-            await page.fill("input[placeholder='왕국']", str(server), timeout=5000)
-            await page.fill("input[placeholder='교환 코드를 입력해 주세요']", str(gift_code), timeout=5000)
+            # 2. 플레이어 ID 입력 (placeholder 및 input 태그 유연 탐색)
+            player_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어'], input.id_input").first
+            await player_input.fill(str(uid), timeout=5000)
 
-            confirm_btn = page.locator("div.exchange_btn")
+            # 3. 교환 코드 입력
+            code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code'], input.code_input").first
+            await code_input.fill(str(gift_code), timeout=5000)
+
+            # 4. 교환 버튼 클릭
+            confirm_btn = page.locator("div.exchange_btn, button.exchange_btn, div:has-text('교환'), div:has-text('Confirm')").first
             await confirm_btn.click(timeout=5000)
             await page.wait_for_timeout(2000)
 
             content = await page.content()
 
-            if "성공" in content or "SUCCESS" in content.upper() or "발송" in content:
+            # 성공 문구 확인
+            if "성공" in content or "SUCCESS" in content.upper() or "발송" in content or "Claimed" in content:
                 return True
             else:
-                print(f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid}, 서버: {server})")
+                print(f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid})")
 
         except Exception as e:
-            print(f"❌ [시도 {attempt}/{max_retries}] 입력 중 에러 발생 (UID: {uid}): {e}")
+            print(f"❌ [시도 {attempt}/{max_retries}] 웹 입력 중 에러 발생 (UID: {uid}): {e}")
 
         if attempt < max_retries:
             await asyncio.sleep(1)
 
     return False
-
+    
 async def process_mass_redeem(gift_code: str, target_channel):
     if not sheet_users or not sheet_codes:
         if target_channel:
