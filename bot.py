@@ -15,7 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
-# ⚡ 브라우저 자동 검사/설치 (1초 자동체크)
+# ⚡ 브라우저 자동 검사/설치
 # ==========================================
 try:
     print("🌐 Playwright 브라우저 검사 진행...")
@@ -99,12 +99,12 @@ class WOSBot(commands.Bot):
 bot = WOSBot()
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (안정성 보완)
+# 🔄 Playwright 자동 입력 로직 (다국어/영문 완벽 대응)
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """제공된 팝업 HTML(modal_content, msg) 구조 완벽 감지 자동화"""
+    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 최종 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
@@ -115,31 +115,35 @@ async def execute_redeem_with_page(
             )
             await page.wait_for_timeout(1000)
 
-            # 2. 플레이어 ID 입력 (요소가 보일 때까지 대기 추가로 타임아웃 방지)
-            uid_input = page.locator("input[placeholder='플레이어 ID']").first
+            # 2. 플레이어 ID 입력 (Player ID / 플레이어 ID)
+            uid_input = page.locator(
+                "input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']"
+            ).first
             await uid_input.wait_for(state="visible", timeout=10000)
             await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 왕국(서버) 입력
-            server_input = page.locator("input[placeholder='왕국']").first
+            # 3. 왕국(서버) 입력 (State / 왕국)
+            server_input = page.locator(
+                "input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
+            ).first
             await server_input.fill(str(server), timeout=5000)
 
-            # 4. 교환 코드 입력
+            # 4. 교환 코드 입력 (Enter Gift Code / 교환 코드를 입력해 주세요)
             code_input = page.locator(
-                "input[placeholder='교환 코드를 입력해 주세요']"
+                "input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']"
             ).first
             await code_input.fill(str(gift_code), timeout=5000)
 
             await page.wait_for_timeout(500)
 
-            # 5. 교환 확인 버튼 클릭
+            # 5. 교환 확인 버튼 클릭 (div.exchange_btn)
             exchange_btn = page.locator("div.exchange_btn").first
             await exchange_btn.click(timeout=5000)
 
             # 6. 결과 팝업 대기 (2.5초)
             await page.wait_for_timeout(2500)
 
-            # 7. 모달 팝업 내부 메시지 태그(<p class="msg">) 정밀 탐색
+            # 7. 모달 팝업 내부 메시지 탐색
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
 
@@ -148,36 +152,60 @@ async def execute_redeem_with_page(
             else:
                 popup_text = await page.content()
 
-            print(f"🔍 [UID: {uid}] 감지된 팝업 문구: {popup_text.strip()}")
+            popup_text_clean = popup_text.strip()
+            popup_text_upper = popup_text_clean.upper()
+            print(f"🔍 [UID: {uid}] 감지된 팝업 문구: {popup_text_clean}")
 
             # -----------------------------------------------------------
-            # 🎯 팝업 메시지 정밀 판정 (성공 / 이미 수령 / 오류 / 만료)
+            # 🎯 팝업 메시지 정밀 판정 (영문/한글 100% 매칭)
             # -----------------------------------------------------------
+            # A. 성공 케이스
             if any(
-                k in popup_text
+                k in popup_text or k in popup_text_upper
                 for k in [
+                    "REDEEMED",
+                    "CLAIM THE REWARDS IN YOUR MAIL",
                     "교환 성공",
                     "우편에서 보상",
                     "보상을 확인하세요",
                     "SUCCESS",
-                    "Claimed",
+                    "CONGRATULATIONS",
                 ]
             ):
                 print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
+            # B. 이미 수령한 케이스 (성공으로 간주)
             elif any(
-                k in popup_text
-                for k in ["이미 수령", "다시 수령", "ALREADY", "RECEIVED"]
+                k in popup_text or k in popup_text_upper
+                for k in [
+                    "ALREADY CLAIMED",
+                    "UNABLE TO CLAIM AGAIN",
+                    "이미 수령",
+                    "다시 수령",
+                    "RECEIVED",
+                    "USED",
+                ]
             ):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
+            # C. 명확한 실패 케이스 (코드 없음 / 만료 / 유저 정보 틀림)
             elif any(
-                k in popup_text
-                for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]
+                k in popup_text or k in popup_text_upper
+                for k in [
+                    "GIFT CODE NOT FOUND",
+                    "CHARACTER INFO IS INCORRECT",
+                    "CASE-SENSITIVE",
+                    "존재하지 않습니다",
+                    "대소문자",
+                    "시간이 초과",
+                    "만료",
+                    "EXPIRED",
+                    "INVALID",
+                ]
             ):
-                print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
+                print(f"❌ [UID: {uid}] 유효하지 않은 코드이거나 유저/서버 정보 오류입니다.")
                 return False
 
             else:
@@ -192,7 +220,7 @@ async def execute_redeem_with_page(
             await asyncio.sleep(1)
 
     return False
-
+    
 async def process_mass_redeem(gift_code: str, target_channel):
     if not sheet_users or not sheet_codes:
         if target_channel:
@@ -246,8 +274,11 @@ async def process_mass_redeem(gift_code: str, target_channel):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
+            # 💡 한국어 브라우저 환경 고정 지정
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="ko-KR",
+                extra_http_headers={"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"}
             )
 
             for idx, user in enumerate(users_records, 1):
