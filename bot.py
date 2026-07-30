@@ -393,7 +393,9 @@ if __name__ == "__main__":
     if BOT_TOKEN:
         bot.run(BOT_TOKEN)
     else:
-        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.")import asyncio
+        print("❌ BOT_TOKEN 환경 변수가 설정되어 있지 않습니다.")
+
+import asyncio
 import os
 import threading
 import datetime
