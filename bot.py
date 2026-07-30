@@ -400,7 +400,7 @@ async def before_monitor():
 # 💬 영문 슬래시 커맨드 구역 (English Slash Commands)
 # ==========================================
 
-# 1. Register Account / Alt
+# 1. Register Account / Alt (E열 from 추가 버전)
 @bot.tree.command(name="register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
 @app_commands.describe(uid="Player ID (Digits)", server="State / Kingdom Number (Digits)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
@@ -411,9 +411,13 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     discord_id = str(interaction.user.id)
     username = interaction.user.display_name
     uid_str = str(uid).strip()
+    
+    # 💡 명령어가 실행된 디스코드 서버 이름 가져오기
+    guild_name = interaction.guild.name if interaction.guild else "DM"
 
     raw_users = sheet_users.get_all_values()
 
+    # 이미 존재하는 UID라면 해당 행 업데이트 (server, from 정보 최신화)
     for row in raw_users[1:]:
         if len(row) >= 3 and row[2].strip() == uid_str:
             cell = sheet_users.find(uid_str, in_column=3)
@@ -421,10 +425,12 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
                 sheet_users.update_cell(cell.row, 1, discord_id)
                 sheet_users.update_cell(cell.row, 2, username)
                 sheet_users.update_cell(cell.row, 4, server)
-                await interaction.response.send_message(f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}`.")
+                sheet_users.update_cell(cell.row, 5, guild_name)  # E열(5번째 열)에 서버명 업데이트
+                await interaction.response.send_message(f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (Server: {guild_name}).")
                 return
 
-    sheet_users.append_row([discord_id, username, uid_str, server])
+    # 신규 UID 추가 (E열 5번째 항목에 guild_name 추가)
+    sheet_users.append_row([discord_id, username, uid_str, server, guild_name])
 
     embed = discord.Embed(
         title="✅ Account Registration Complete",
@@ -433,6 +439,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     )
     embed.add_field(name="UID", value=uid_str, inline=True)
     embed.add_field(name="State (Kingdom)", value=f"#{server}", inline=True)
+    embed.add_field(name="Registered From", value=guild_name, inline=False)
 
     await interaction.response.send_message(embed=embed)
 
