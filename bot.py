@@ -25,7 +25,7 @@ REPORT_CHANNEL_ID = 1532160917943484626  # 결과를 보고받을 채널 ID
 # 구글 시트 이름
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "wos_bot_db")
 
-# 환경변수에 저장된 GOOGLE_JSON 파싱 (또나 로클 service_account.json 파일 사용)
+# 환경변수에 저장된 GOOGLE_JSON 파싱
 GOOGLE_JSON_RAW = os.environ.get("GOOGLE_JSON", "")
 
 # ==========================================
@@ -36,9 +36,19 @@ scope = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+sheet_users = None
+sheet_codes = None
+
 try:
     if GOOGLE_JSON_RAW:
         creds_dict = json.loads(GOOGLE_JSON_RAW)
+
+        # 💡 [핵심 해결] private_key 내부의 \n 문자열을 실제 줄바꿈 문자로 변환
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace(
+                "\\n", "\n"
+            )
+
         creds = ServiceAccountCredentials.from_json_keyfile_dict(
             creds_dict, scope
         )
@@ -54,7 +64,7 @@ try:
     sheet_codes = sh.worksheet("used_codes")  # 두번째 시트 (used_codes)
     print("✅ 구글 시트 데이터베이스 연동 성공!")
 except Exception as e:
-    print(f"❌ 구글 시트 연동 실패: {e}")
+    print(f"❌ [초기화 에러] 구글 시트 연동 실패: {e}")
 
 # ==========================================
 # 🌐 Render Web Service 유지용 Flask 웹 서버
@@ -98,7 +108,7 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (단일 Page 처리)
+# 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 3
@@ -148,6 +158,13 @@ async def execute_redeem_with_page(
 
 async def process_mass_redeem(gift_code: str, target_channel):
     """구글 시트의 모든 유저 목록을 가져와 일괄 등록"""
+    if not sheet_users or not sheet_codes:
+        if target_channel:
+            await target_channel.send(
+                "❌ 구글 시트 연동 상태가 올바르지 않습니다."
+            )
+        return
+
     gift_code = gift_code.strip()
 
     # 1. 이미 사용된 코드인지 구글 시트 확인
@@ -236,7 +253,7 @@ async def monitor_coupon_channel():
     channel = bot.get_channel(MONITOR_CHANNEL_ID)
     report_channel = bot.get_channel(REPORT_CHANNEL_ID)
 
-    if not channel:
+    if not channel or not sheet_codes:
         return
 
     try:
@@ -284,6 +301,13 @@ async def before_monitor():
 )
 @app_commands.describe(uid="플레이어 ID (숫자)", server="왕국 번호 (숫자)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
+    if not sheet_users:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다. 관리자에게 문의하세요.",
+            ephemeral=True,
+        )
+        return
+
     discord_id = str(interaction.user.id)
 
     # 구글 시트에 기존 등록 유저 확인
@@ -312,8 +336,13 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     name="내정보", description="현재 등록되어 있는 내 정보를 확인합니다."
 )
 async def my_info(interaction: discord.Interaction):
-    discord_id = str(interaction.user.id)
+    if not sheet_users:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True
+        )
+        return
 
+    discord_id = str(interaction.user.id)
     records = sheet_users.get_all_records()
     user_info = next(
         (row for row in records if str(row.get("discord_id")) == discord_id),
@@ -336,6 +365,12 @@ async def my_info(interaction: discord.Interaction):
     description="최근 봇이 처리한 기프트코드 교환 내역을 확인합니다.",
 )
 async def show_history(interaction: discord.Interaction):
+    if not sheet_codes:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True
+        )
+        return
+
     records = sheet_codes.get_all_records()
 
     if not records:
@@ -349,7 +384,6 @@ async def show_history(interaction: discord.Interaction):
         color=0x9B59B6,
     )
 
-    # 최근 10개 역순 추출
     for row in reversed(records[-10:]):
         embed.add_field(
             name=f"🎁 코드: `{row.get('code')}`",
@@ -366,6 +400,12 @@ async def show_history(interaction: discord.Interaction):
     description="현재 자동 교환에 등록된 총 유저 수 현황을 확인합니다.",
 )
 async def user_count(interaction: discord.Interaction):
+    if not sheet_users:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True
+        )
+        return
+
     records = sheet_users.get_all_records()
 
     embed = discord.Embed(
@@ -385,6 +425,12 @@ async def user_count(interaction: discord.Interaction):
 async def delete_user(
     interaction: discord.Interaction, target_user: discord.User
 ):
+    if not sheet_users:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True
+        )
+        return
+
     discord_id = str(target_user.id)
 
     cell = sheet_users.find(discord_id, in_column=1)
@@ -412,6 +458,12 @@ async def delete_user(
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def full_user_list(interaction: discord.Interaction):
+    if not sheet_users:
+        await interaction.response.send_message(
+            "❌ DB(구글시트)가 연결되지 않았습니다.", ephemeral=True
+        )
+        return
+
     records = sheet_users.get_all_records()
 
     if not records:
@@ -466,19 +518,35 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
 
 
 # ==========================================
-# ⚠️ 관리자 권한 예외 처리
+# ⚠️ 에러 핸들러 (상세 에러 콘솔 출력 기능 추가)
 # ==========================================
+@register.error
+@my_info.error
+@show_history.error
+@user_count.error
 @delete_user.error
 @full_user_list.error
 @manual_redeem.error
-async def admin_command_error(
+async def global_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ):
+    # 콘솔 로그에 원인 감추지 않고 상세히 출력
+    print(
+        f"❌ [{interaction.command.name}] 실행 중 상세 오류 발생: {error}"
+    )
+
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
             "🚫 이 명령어는 **서버 관리자** 권한이 있는 분만 사용하실 수 있습니다.",
             ephemeral=True,
         )
+    else:
+        # 처리 중 에러 안내
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ 명령어 처리 중 에러가 발생했습니다. Render 콘솔 로그를 확인해 주세요.",
+                ephemeral=True,
+            )
 
 
 # ==========================================
