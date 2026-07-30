@@ -101,61 +101,91 @@ bot = WOSBot()
 # ==========================================
 # 🔄 Playwright 자동 입력 로직 (최신 사이트 폼 반영)
 # ==========================================
-async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """제공된 실제 HTML 구조 기반 WOS 공식 교환 정밀 자동화"""
+async def execute_redeem_with_page(
+    page, uid: str, server: int, gift_code: str, max_retries: int = 2
+) -> bool:
+    """초고속 스마트 대기 적용 WOS 교환 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
-            await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1000)
+            await page.goto(
+                "https://wos-giftcode.centurygame.com/",
+                timeout=15000,
+                wait_until="domcontentloaded",
+            )
 
-            # 2. 플레이어 ID 입력 (Exact Placeholder)
+            # 2. 값 입력 (각 500ms 타임아웃 유지)
             uid_input = page.locator("input[placeholder='플레이어 ID']").first
-            await uid_input.fill(str(uid), timeout=5000)
+            await uid_input.fill(str(uid), timeout=1000)
 
-            # 3. 왕국(서버) 입력 (Exact Placeholder)
             server_input = page.locator("input[placeholder='왕국']").first
-            await server_input.fill(str(server), timeout=5000)
+            await server_input.fill(str(server), timeout=1000)
 
-            # 4. 교환 코드 입력 (Exact Placeholder)
-            code_input = page.locator("input[placeholder='교환 코드를 입력해 주세요']").first
-            await code_input.fill(str(gift_code), timeout=5000)
+            code_input = page.locator(
+                "input[placeholder='교환 코드를 입력해 주세요']"
+            ).first
+            await code_input.fill(str(gift_code), timeout=1000)
 
-            await page.wait_for_timeout(500)
-
-            # 5. 교환 확인 버튼 클릭 (Exact Class: div.exchange_btn)
+            # 3. 교환 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
-            await exchange_btn.click(timeout=5000)
+            await exchange_btn.click(timeout=3000)
 
-            # 6. 결과 팝업 응답 대기 (2.5초)
-            await page.wait_for_timeout(2500)
+            # 4. ⚡ 팝업이 나타나는 순간 '즉시' 읽어오기 (스마트 대기)
+            # 고정 지연시간 대신 팝업창 요소가 화면에 뜨는 찰나를 감지합니다.
+            try:
+                msg_locator = page.locator(
+                    "p.msg, div.modal_content, div.msg"
+                ).first
+                await msg_locator.wait_for(state="visible", timeout=4000)
+                popup_text = await msg_locator.text_content()
+            except Exception:
+                popup_text = await page.content()
 
-            # 7. 팝업 내용 검사
-            content = await page.content()
+            popup_text = popup_text.strip()
+            print(f"🔍 [UID: {uid}] 팝업 응답: {popup_text}")
 
-            # A. 교환 성공
-            if any(k in content for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
+            # -----------------------------------------------------------
+            # 🎯 팝업 메시지 정밀 판정 (성공 / 이미 수령 / 오류 / 만료)
+            # -----------------------------------------------------------
+            if any(
+                k in popup_text
+                for k in [
+                    "교환 성공",
+                    "우편에서 보상",
+                    "보상을 확인하세요",
+                    "SUCCESS",
+                    "Claimed",
+                ]
+            ):
                 print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
-            # B. 이미 수령한 쿠폰 (성공으로 간주)
-            elif any(k in content for k in ["이미 수령", "다시 수령하실 수 없습니다", "ALREADY", "RECEIVED"]):
+            elif any(
+                k in popup_text
+                for k in ["이미 수령", "다시 수령", "ALREADY", "RECEIVED"]
+            ):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
-            # C. 유효하지 않거나 만료된 코드
-            elif any(k in content for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
+            elif any(
+                k in popup_text
+                for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]
+            ):
                 print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
                 return False
 
             else:
-                print(f"⚠️ [시도 {attempt}/{max_retries}] 팝업 문구 미감지 (UID: {uid})")
+                print(
+                    f"⚠️ [시도 {attempt}/{max_retries}] 감지되지 않은 문구: {popup_text}"
+                )
 
         except Exception as e:
-            print(f"❌ [시도 {attempt}/{max_retries}] 입력 진행 중 에러 발생 (UID: {uid}): {e}")
+            print(
+                f"❌ [시도 {attempt}/{max_retries}] 진행 중 에러 발생 (UID: {uid}): {e}"
+            )
 
         if attempt < max_retries:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
     return False
     
