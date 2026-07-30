@@ -244,9 +244,28 @@ async def monitor_coupon_channel():
 
     try:
         async for message in channel.history(limit=5):
-            found_codes = re.findall(r"\b[A-Z0-9]{6,15}\b", message.content)
+            # 1. "Code: XXXX" 형태 우선 추출 (대소문자 구별)
+            found_codes = re.findall(
+                r"Code:\s*([a-zA-Z0-9]{6,20})", message.content, re.IGNORECASE
+            )
+
+            # 2. 패턴 매칭이 안 된 경우 일반 단어 추출 (예비용)
+            if not found_codes:
+                found_codes = re.findall(
+                    r"\b[a-zA-Z0-9]{6,20}\b", message.content
+                )
 
             for code in found_codes:
+                # URL이나 특정 단어 제외 필터링 (예: http, https, Redemption 등)
+                if code.lower() in [
+                    "http",
+                    "https",
+                    "redemption",
+                    "until",
+                    "valid",
+                ]:
+                    continue
+
                 cursor.execute(
                     "SELECT code FROM used_codes WHERE code = ?", (code,)
                 )
@@ -254,7 +273,6 @@ async def monitor_coupon_channel():
                     await process_mass_redeem(code, report_channel)
     except Exception as e:
         print(f"모니터링 중 에러 발생: {e}")
-
 
 @monitor_coupon_channel.before_loop
 async def before_monitor():
