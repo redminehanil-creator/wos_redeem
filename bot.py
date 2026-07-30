@@ -102,23 +102,33 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직 (최신 사이트 폼 반영)
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """간소화된 WOS 공식 교환 사이트 자동화 (UID + 서버 + 코드 직결 구조)"""
+    """WOS 공식 교환 사이트 자동화 (Input 순서 지정 방식으로 타임아웃 방지)"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1000)
 
-            # 2. 플레이어 ID (UID) 입력
-            uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어']").first
+            # 💡 입력창(input) 요소를 순서대로 가져옵니다.
+            inputs = page.locator("input")
+            
+            # 입력창 개수가 최소 3개 이상인지 확인
+            if await inputs.count() < 3:
+                # 만약 input 태그 형태가 다르면 placeholder 유연 탐색 백업
+                uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어']").first
+                server_input = page.locator("input[placeholder*='왕국'], input[placeholder*='서버'], input[placeholder*='Kingdom'], input[placeholder*='Server']").first
+                code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code']").first
+            else:
+                # 2. 첫 번째 입력창: UID
+                uid_input = inputs.nth(0)
+                # 3. 두 번째 입력창: 서버(왕국)
+                server_input = inputs.nth(1)
+                # 4. 세 번째 입력창: 기프트코드
+                code_input = inputs.nth(2)
+
+            # 값 채우기
             await uid_input.fill(str(uid), timeout=5000)
-
-            # 3. 왕국 (서버) 입력
-            server_input = page.locator("input[placeholder*='왕국'], input[placeholder*='서버'], input[placeholder*='Kingdom'], input[placeholder*='Server']").first
             await server_input.fill(str(server), timeout=5000)
-
-            # 4. 교환 코드 입력
-            code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code']").first
             await code_input.fill(str(gift_code), timeout=5000)
 
             # 5. 교환 버튼 클릭
@@ -131,17 +141,14 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             # 7. 팝업 텍스트 검사 및 정밀 판정
             content = await page.content()
 
-            # A. 성공 케이스
             if any(k in content for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
                 print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
-            # B. 이미 수령한 케이스 (성공 처리)
             elif any(k in content for k in ["이미 수령", "다시 수령하실 수 없습니다", "ALREADY", "RECEIVED"]):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
-            # C. 명확한 실패 케이스 (존재하지 않는 코드 / 만료된 코드)
             elif any(k in content for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
                 print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
                 return False
