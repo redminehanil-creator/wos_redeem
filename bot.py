@@ -102,43 +102,62 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직 (2단계 정밀 처리)
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """WOS 공식 교환 사이트 2단계(로그인 -> 교환) 정밀 자동화"""
+    """WOS 공식 교환 사이트 정밀 자동화 (실패/중복/만료 팝업 완벽 분류)"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            # 2. UID 입력창 찾기 및 입력
+            # 2. UID 입력
             uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어'], input.id_input").first
             await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 로그인/확인 버튼 클릭 (닉네임 조회)
+            # 3. 로그인 / Confirm 클릭 (계정 조회)
             login_btn = page.locator("button:has-text('Confirm'), button:has-text('로그인'), div.login_btn, div:has-text('Confirm')").first
             await login_btn.click(timeout=5000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(1000)
 
-            # 4. 쿠폰 코드 입력창 찾기 및 입력
+            # 계정 확인 모달 팝업이 뜨는 경우 처리
+            confirm_modal_btn = page.locator("div.confirm_btn, button.confirm_btn, div.dialog_btn, button:has-text('확인'), button:has-text('OK')")
+            if await confirm_modal_btn.count() > 0 and await confirm_modal_btn.first.is_visible():
+                await confirm_modal_btn.first.click(timeout=3000)
+                await page.wait_for_timeout(1000)
+
+            # 4. 교환 코드 입력
             code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code'], input.code_input").first
             await code_input.fill(str(gift_code), timeout=5000)
 
-            # 5. 교환(Redeem) 버튼 클릭
+            # 5. 교환(Exchange / Redeem) 버튼 클릭
             redeem_btn = page.locator("button:has-text('Redeem'), button:has-text('교환'), div.exchange_btn, div:has-text('Redeem')").first
             await redeem_btn.click(timeout=5000)
-            await page.wait_for_timeout(2000)
+            
+            # 6. 결과 팝업창 응답 대기
+            await page.wait_for_timeout(2500)
 
-            # 6. 결과 페이지/팝업 내용 감지
+            # 7. 전체 페이지 HTML/텍스트 감지
             content = await page.content()
-            content_upper = content.upper()
 
-            # 성공 및 이미 사용함/중복 처리 판정
-            if any(k in content for k in ["성공", "발송", "완료", "Claimed", "SUCCESS", "Congratulations"]):
+            # -----------------------------------------------------------
+            # 🎯 팝업 메시지 정밀 판정
+            # -----------------------------------------------------------
+            # A. 성공 케이스
+            if any(k in content for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
+                print(f"✅ [UID: {uid}] 교환 성공!")
                 return True
-            elif "ALREADY" in content_upper or "RECEIVED" in content_upper or "이미" in content:
-                print(f"ℹ️ [UID: {uid}] 이미 수령된 쿠폰입니다. (성공 처리)")
+
+            # B. 이미 수령한 케이스 (성공으로 간주)
+            elif any(k in content for k in ["이미 수령", "다시 수령하실 수 없습니다", "ALREADY", "RECEIVED"]):
+                print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
+
+            # C. 명확한 실패 케이스 (재시도 없이 즉시 실패 반환)
+            elif any(k in content for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
+                print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
+                return False
+
             else:
-                print(f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid})")
+                print(f"⚠️ [시도 {attempt}/{max_retries}] 알 수 없는 팝업 응답 (UID: {uid})")
 
         except Exception as e:
             print(f"❌ [시도 {attempt}/{max_retries}] 진행 중 에러 발생 (UID: {uid}): {e}")
@@ -147,7 +166,7 @@ async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, 
             await asyncio.sleep(1)
 
     return False
-
+    
 async def process_mass_redeem(gift_code: str, target_channel):
     if not sheet_users or not sheet_codes:
         if target_channel:
