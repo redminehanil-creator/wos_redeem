@@ -35,6 +35,9 @@ REPORT_CHANNEL_ID = 1532160917943484626   # 결과 보고 채널 ID
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "wos_bot_db")
 GOOGLE_JSON_RAW = os.environ.get("GOOGLE_JSON", "")
 
+# 🛑 대량 교환 강제 중단 플래그
+cancel_mass_redeem = False
+
 # ==========================================
 # 📊 구글 시트 DB 세팅
 # ==========================================
@@ -230,6 +233,9 @@ async def execute_redeem_with_page(
 # ⚡ 초고속 병렬 처리 대량 교환 로직
 # ==========================================
 async def process_mass_redeem(gift_code: str, target_channel):
+    global cancel_mass_redeem
+    cancel_mass_redeem = False  # 작업 시작 시 중단 플래그 리셋
+
     if not sheet_users or not sheet_codes:
         if target_channel:
             await target_channel.send("❌ Google Sheet database connection error.")
@@ -290,9 +296,16 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     async def worker(context):
         nonlocal success_count, fail_count, processed_count
+        global cancel_mass_redeem
+
         page = await context.new_page()
 
         while not queue.empty():
+            # 🛑 강제 중단 요청 감지 시 워커 즉시 종료
+            if cancel_mass_redeem:
+                print("🛑 강제 중단 요청 감지. 작업을 멈춥니다.")
+                break
+
             try:
                 user = queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -321,7 +334,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
                     fail_count += 1
                 processed_count += 1
 
-                # 5개 처리될 때마다 디스코드 진행상황 업데이트 (API 제한 방지)
+                # 5개 처리될 때마다 디스코드 진행상황 업데이트
                 if status_msg and (processed_count % 5 == 0 or processed_count == total_users):
                     try:
                         await status_msg.edit(
@@ -349,21 +362,30 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 3. 결과 기록
-    summary = f"Success {success_count} / Failed {fail_count}"
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        sheet_codes.append_row([gift_code, summary, now_str])
-    except Exception as sheet_err:
-        print(f"Google Sheet save error: {sheet_err}")
+    # 3. 중단 여부에 따른 최종 결과 처리
+    if cancel_mass_redeem:
+        if target_channel:
+            await target_channel.send(
+                f"🛑 **작업이 중간에 강제 중단되었습니다.**\n"
+                f"- 코드: `{gift_code}`\n"
+                f"- 처리된 계정: **{processed_count} / {total_users}**\n"
+                f"- 성공: **{success_count}** | 실패: **{fail_count}**"
+            )
+    else:
+        # 정상 완료 시 기록 작성
+        summary = f"Success {success_count} / Failed {fail_count}"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            sheet_codes.append_row([gift_code, summary, now_str])
+        except Exception as sheet_err:
+            print(f"Google Sheet save error: {sheet_err}")
 
-    # 4. 결과 출력
-    embed = discord.Embed(title="🎁 Gift Code Auto Redemption Completed", color=0x00FF00)
-    embed.add_field(name="Gift Code", value=f"`{gift_code}`", inline=False)
-    embed.add_field(name="Summary", value=f"Total Accounts: **{total_users}**\nSuccess: **{success_count}** | Failed: **{fail_count}**", inline=False)
+        embed = discord.Embed(title="🎁 Gift Code Auto Redemption Completed", color=0x00FF00)
+        embed.add_field(name="Gift Code", value=f"`{gift_code}`", inline=False)
+        embed.add_field(name="Summary", value=f"Total Accounts: **{total_users}**\nSuccess: **{success_count}** | Failed: **{fail_count}**", inline=False)
 
-    if target_channel:
-        await target_channel.send(embed=embed)
+        if target_channel:
+            await target_channel.send(embed=embed)
 
 # ==========================================
 # 📡 모니터링 구역
@@ -400,7 +422,7 @@ async def before_monitor():
 # 💬 영문 슬래시 커맨드 구역 (wr_ 접두사 적용)
 # ==========================================
 
-# 1. Register Account / Alt (wr_register 적용 및 나에게만 보이기 ephemeral=True 적용)
+# 1. Register Account / Alt
 @bot.tree.command(name="wr_register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
 @app_commands.describe(uid="Player ID (Digits)", server="State / Kingdom Number (Digits)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
@@ -412,7 +434,6 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     username = interaction.user.display_name
     uid_str = str(uid).strip()
 
-    # 디스코드 서버 이름 추출
     guild_name = "Direct Message"
     if interaction.guild:
         guild_name = interaction.guild.name
@@ -425,7 +446,6 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
 
     raw_users = sheet_users.get_all_values()
 
-    # 이미 존재(동일 UID)하는 행이 있는지 확인 후 수정
     for row_idx, row in enumerate(raw_users[1:], start=2):
         if len(row) >= 3 and row[2].strip() == uid_str:
             sheet_users.update_cell(row_idx, 1, discord_id)
@@ -439,7 +459,6 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
             )
             return
 
-    # 신규 등록
     sheet_users.append_row([discord_id, username, uid_str, str(server), guild_name])
 
     embed = discord.Embed(
@@ -452,8 +471,8 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     embed.add_field(name="Server (From)", value=guild_name, inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-# 2. Check My Accounts (wr_myinfo)
+
+# 2. Check My Accounts
 @bot.tree.command(name="wr_myinfo", description="View all registered UIDs and State numbers for your account.")
 async def my_info(interaction: discord.Interaction):
     if not sheet_users:
@@ -482,7 +501,7 @@ async def my_info(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
 
-# 3. Delete Specific UID (wr_deleteinfo)
+# 3. Delete Specific UID
 @bot.tree.command(name="wr_deleteinfo", description="Delete a specific registered UID from your account.")
 @app_commands.describe(uid="Player UID to delete")
 async def delete_my_uid(interaction: discord.Interaction, uid: str):
@@ -508,7 +527,7 @@ async def delete_my_uid(interaction: discord.Interaction, uid: str):
     else:
         await interaction.response.send_message(f"❌ UID `{uid_str}` was not found in your registered accounts.", ephemeral=True)
 
-# 4. View Gift Code History (wr_history)
+# 4. View Gift Code History
 @bot.tree.command(name="wr_history", description="Check recently processed gift code redemption history.")
 async def show_history(interaction: discord.Interaction):
     if not sheet_codes:
@@ -529,7 +548,7 @@ async def show_history(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 5. Total Registered User Count (wr_usercount)
+# 5. Total Registered User Count
 @bot.tree.command(name="wr_usercount", description="Check total registered accounts for auto redemption.")
 async def user_count(interaction: discord.Interaction):
     if not sheet_users:
@@ -546,7 +565,7 @@ async def user_count(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# 6. [Admin] Manual Redeem Code (wr_sendcoupon)
+# 6. [Admin] Manual Redeem Code
 @bot.tree.command(name="wr_sendcoupon", description="[Admin] Manually trigger gift code redemption for all registered accounts.")
 @app_commands.describe(gift_code="Gift code to redeem")
 @app_commands.checks.has_permissions(administrator=True)
@@ -554,7 +573,7 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...", ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 7. [Admin] Delete Specific User Entirely (wr_deleteuser)
+# 7. [Admin] Delete Specific User Entirely
 @bot.tree.command(name="wr_deleteuser", description="[Admin] Delete all registered data for a specific Discord user.")
 @app_commands.describe(target_user="Discord user to delete")
 @app_commands.checks.has_permissions(administrator=True)
@@ -585,6 +604,13 @@ async def delete_user(interaction: discord.Interaction, target_user: discord.Use
         color=0xE74C3C
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# 8. [신규] 대량 교환 강제 중단 커맨드
+@bot.tree.command(name="wr_stop", description="진행 중인 대량 쿠폰 교환 작업을 강제 중단합니다.")
+async def stop_redeem(interaction: discord.Interaction):
+    global cancel_mass_redeem
+    cancel_mass_redeem = True
+    await interaction.response.send_message("🛑 **쿠폰 교환 중단 요청이 접수되었습니다.** 현재 처리 중인 건까지만 완료 후 중단됩니다.", ephemeral=True)
 
 # ==========================================
 # 🚀 메인 실행
