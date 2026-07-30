@@ -102,65 +102,53 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직 (2단계 정밀 처리)
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """WOS 공식 교환 사이트 정밀 자동화 (실패/중복/만료 팝업 완벽 분류)"""
+    """간소화된 WOS 공식 교환 사이트 자동화 (UID + 서버 + 코드 직결 구조)"""
     for attempt in range(1, max_retries + 1):
         try:
             # 1. 사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
             await page.wait_for_timeout(1000)
 
-            # 2. UID 입력
-            uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어'], input.id_input").first
+            # 2. 플레이어 ID (UID) 입력
+            uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어']").first
             await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 로그인 / Confirm 클릭 (계정 조회)
-            login_btn = page.locator("button:has-text('Confirm'), button:has-text('로그인'), div.login_btn, div:has-text('Confirm')").first
-            await login_btn.click(timeout=5000)
-            await page.wait_for_timeout(1000)
+            # 3. 왕국 (서버) 입력
+            server_input = page.locator("input[placeholder*='왕국'], input[placeholder*='서버'], input[placeholder*='Kingdom'], input[placeholder*='Server']").first
+            await server_input.fill(str(server), timeout=5000)
 
-            # 계정 확인 모달 팝업이 뜨는 경우 처리
-            confirm_modal_btn = page.locator("div.confirm_btn, button.confirm_btn, div.dialog_btn, button:has-text('확인'), button:has-text('OK')")
-            if await confirm_modal_btn.count() > 0 and await confirm_modal_btn.first.is_visible():
-                await confirm_modal_btn.first.click(timeout=3000)
-                await page.wait_for_timeout(1000)
-
-            # 4. 교환 코드 입력
-            code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code'], input.code_input").first
+            # 4. 교환 코드 입력 (입력된 코드 원본 그대로 유지)
+            code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code']").first
             await code_input.fill(str(gift_code), timeout=5000)
 
-            # 5. 교환(Exchange / Redeem) 버튼 클릭
-            redeem_btn = page.locator("button:has-text('Redeem'), button:has-text('교환'), div.exchange_btn, div:has-text('Redeem')").first
+            # 5. 교환 버튼 클릭
+            redeem_btn = page.locator("div.exchange_btn, button.exchange_btn, div:has-text('교환'), button:has-text('교환'), div:has-text('Redeem'), button:has-text('Redeem')").first
             await redeem_btn.click(timeout=5000)
             
-            # 6. 결과 팝업창 응답 대기
+            # 6. 결과 팝업 대기 (2.5초)
             await page.wait_for_timeout(2500)
 
-            # 7. 전체 페이지 HTML/텍스트 감지
+            # 7. 팝업 텍스트 검사
             content = await page.content()
 
-            # -----------------------------------------------------------
-            # 🎯 팝업 메시지 정밀 판정
-            # -----------------------------------------------------------
-            # A. 성공 케이스
+            # 🎯 보내주신 팝업 스크린샷 문구와 100% 매칭
             if any(k in content for k in ["교환 성공", "우편에서 보상", "보상을 확인하세요", "SUCCESS", "Claimed"]):
-                print(f"✅ [UID: {uid}] 교환 성공!")
+                print(f"✅ [UID: {uid} / 서버: {server}] 교환 성공!")
                 return True
 
-            # B. 이미 수령한 케이스 (성공으로 간주)
             elif any(k in content for k in ["이미 수령", "다시 수령하실 수 없습니다", "ALREADY", "RECEIVED"]):
                 print(f"ℹ️ [UID: {uid}] 이미 수령한 쿠폰입니다. (성공 처리)")
                 return True
 
-            # C. 명확한 실패 케이스 (재시도 없이 즉시 실패 반환)
             elif any(k in content for k in ["존재하지 않습니다", "대소문자", "시간이 초과", "만료"]):
                 print(f"❌ [UID: {uid}] 유효하지 않거나 만료된 코드입니다.")
                 return False
 
             else:
-                print(f"⚠️ [시도 {attempt}/{max_retries}] 알 수 없는 팝업 응답 (UID: {uid})")
+                print(f"⚠️ [시도 {attempt}/{max_retries}] 팝업 문구 미감지 (UID: {uid})")
 
         except Exception as e:
-            print(f"❌ [시도 {attempt}/{max_retries}] 진행 중 에러 발생 (UID: {uid}): {e}")
+            print(f"❌ [시도 {attempt}/{max_retries}] 입력 진행 중 에러 발생 (UID: {uid}): {e}")
 
         if attempt < max_retries:
             await asyncio.sleep(1)
