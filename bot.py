@@ -172,10 +172,21 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     gift_code = gift_code.strip()
 
-    # 1. 이미 사용된 코드인지 구글 시트 확인
-    used_records = sheet_users.get_all_records()
-    used_codes_records = sheet_codes.get_all_records()
+    # 1. 시트 데이터 가져오기
+    try:
+        users_records = sheet_users.get_all_records()  # 등록된 유저 목록
+        used_codes_records = (
+            sheet_codes.get_all_records()
+        )  # 처리된 코드 내역
+    except Exception as e:
+        print(f"❌ 구글 시트 데이터 로드 실패: {e}")
+        if target_channel:
+            await target_channel.send(
+                f"❌ 구글 시트 데이터를 읽는 중 에러가 발생했습니다: {e}"
+            )
+        return
 
+    # 2. 이미 사용된 코드인지 확인
     if any(row.get("code") == gift_code for row in used_codes_records):
         if target_channel:
             await target_channel.send(
@@ -183,17 +194,19 @@ async def process_mass_redeem(gift_code: str, target_channel):
             )
         return
 
-    if not used_records:
+    # 3. 유저 등록 여부 확인
+    if not users_records:
         if target_channel:
             await target_channel.send(
                 "❌ DB(구글시트)에 등록된 유저가 없어 교환을 진행하지 않습니다."
             )
         return
 
+    total_users = len(users_records)
     status_msg = None
     if target_channel:
         status_msg = await target_channel.send(
-            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{len(used_records)}명** 자동 입력 작업을 시작합니다."
+            f"🚀 **새로운 기프트코드 발견!** [`{gift_code}`]\n총 **{total_users}명** 자동 입력 작업을 시작합니다."
         )
 
     success_count = 0
@@ -206,7 +219,8 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-            for idx, user in enumerate(used_records, 1):
+            # 💡 [수정 완료] users_records 변수를 순회합니다.
+            for idx, user in enumerate(users_records, 1):
                 uid = user.get("uid")
                 server = user.get("server")
 
@@ -216,7 +230,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
                         page, str(uid), server, gift_code
                     )
                 except Exception as e:
-                    print(f"❌ [{idx}/{len(used_records)}] 작업 중 예외 발생: {e}")
+                    print(f"❌ [{idx}/{total_users}] 작업 중 예외 발생: {e}")
                     is_success = False
                 finally:
                     await page.close()
@@ -226,11 +240,11 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 else:
                     fail_count += 1
 
-                # 💡 유저 1명 처리할 때마다 실시간으로 디스코드 메시지 수정
+                # 💡 실시간 디스코드 진행상황 업데이트
                 if status_msg:
                     try:
                         await status_msg.edit(
-                            content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{len(used_records)}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
+                            content=f"🔄 **자동 입력 진행 중...** [`{gift_code}`] [{idx}/{total_users}]\n✅ 성공: {success_count}명 | ❌ 실패: {fail_count}명"
                         )
                     except Exception as edit_err:
                         print(f"메시지 수정 에러: {edit_err}")
@@ -241,7 +255,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright 실행 중 치명적 에러: {pw_err}")
 
-    # 3. 구글 시트 히스토리에 기록
+    # 4. 구글 시트 히스토리에 기록
     summary = f"성공 {success_count}명 / 실패 {fail_count}명"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -249,33 +263,14 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as sheet_err:
         print(f"구글 시트 저장 에러: {sheet_err}")
 
-    # 4. 결과 최종 출력
+    # 5. 최종 결과 출력
     embed = discord.Embed(
         title="🎁 기프트코드 자동 교환 완료", color=0x00FF00
     )
     embed.add_field(name="기프트코드", value=f"`{gift_code}`", inline=False)
     embed.add_field(
         name="결과 요약",
-        value=f"총 대상: **{len(used_records)}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명",
-        inline=False,
-    )
-
-    if target_channel:
-        await target_channel.send(embed=embed)
-        
-    # 3. 구글 시트 히스토리에 기록
-    summary = f"성공 {success_count}명 / 실패 {fail_count}명"
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sheet_codes.append_row([gift_code, summary, now_str])
-
-    # 4. 결과 출력
-    embed = discord.Embed(
-        title="🎁 기프트코드 자동 교환 완료", color=0x00FF00
-    )
-    embed.add_field(name="기프트코드", value=f"`{gift_code}`", inline=False)
-    embed.add_field(
-        name="결과 요약",
-        value=f"총 대상: **{len(users_records)}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명",
+        value=f"총 대상: **{total_users}**명\n성공: **{success_count}**명 / 실패: **{fail_count}**명",
         inline=False,
     )
 
