@@ -89,12 +89,12 @@ bot = WOSBot()
 
 
 # ==========================================
-# 🔄 Playwright 기반 웹 자동 입력 (재시도 로직 포함)
+# 🔄 실제 HTML 기반 Playwright 자동 입력 (재시도 포함)
 # ==========================================
 async def execute_redeem_playwright(
     uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """웹사이트 UI에 플레이어 ID, 왕국, 교환 코드를 입력 (실패 시 최대 max_retries회 재시도)"""
+    """웹사이트 HTML 요소에 직접 정확히 접근하는 교환 로직"""
     for attempt in range(1, max_retries + 1):
         async with async_playwright() as p:
             browser = None
@@ -105,38 +105,30 @@ async def execute_redeem_playwright(
                 )
                 page = await context.new_page()
 
-                # 교환 센터 접속
+                # 1. 교환 센터 접속
                 await page.goto(
                     "https://wos-giftcode.centurygame.com/", timeout=30000
                 )
                 await page.wait_for_timeout(1500)
 
-                # 1. [플레이어 ID] 입력
-                id_input = page.locator(
-                    "input[placeholder*='플레이어 ID'], input[placeholder*='Player ID']"
-                ).first
-                await id_input.fill(str(uid))
+                # 2. [플레이어 ID] 입력
+                await page.fill("input[placeholder='플레이어 ID']", str(uid))
 
-                # 2. [왕국] 입력
-                server_input = page.locator(
-                    "input[placeholder*='왕국'], input[placeholder*='Kingdom']"
-                ).first
-                await server_input.fill(str(server))
+                # 3. [왕국] 입력
+                await page.fill("input[placeholder='왕국']", str(server))
 
-                # 3. [교환 코드] 입력
-                code_input = page.locator(
-                    "input[placeholder*='교환 코드'], input[placeholder*='Gift Code']"
-                ).first
-                await code_input.fill(str(gift_code))
+                # 4. [교환 코드] 입력
+                await page.fill(
+                    "input[placeholder='교환 코드를 입력해 주세요']",
+                    str(gift_code),
+                )
 
-                # 4. [교환 확인] 버튼 클릭
-                confirm_btn = page.locator(
-                    "button:has-text('교환 확인'), button:has-text('Confirm')"
-                ).first
+                # 5. [교환 확인] 버튼 클릭 (div.exchange_btn 클릭)
+                confirm_btn = page.locator("div.exchange_btn")
                 await confirm_btn.click()
                 await page.wait_for_timeout(2500)
 
-                # 5. 결과 확인
+                # 6. 결과 확인
                 content = await page.content()
 
                 if (
@@ -158,7 +150,6 @@ async def execute_redeem_playwright(
                 if browser:
                     await browser.close()
 
-        # 재시도 전 1.5초 대기
         if attempt < max_retries:
             await asyncio.sleep(1.5)
 
@@ -201,7 +192,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
     fail_count = 0
 
     for idx, (uid, server) in enumerate(rows, 1):
-        # Playwright 비동기 함수 직접 호출 (실패 시 최대 3회 재시도 포함)
         is_success = await execute_redeem_playwright(uid, server, gift_code)
 
         if is_success:
@@ -216,7 +206,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
         await asyncio.sleep(1)
 
-    # 3. 교환 결과를 DB 히스토리에 기록
+    # 3. DB 기록
     summary = f"성공 {success_count}명 / 실패 {fail_count}명"
     cursor.execute(
         """
@@ -226,7 +216,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     )
     conn.commit()
 
-    # 4. 완료 임베드 출력
+    # 4. 결과 출력
     embed = discord.Embed(
         title="🎁 기프트코드 자동 교환 완료", color=0x00FF00
     )
@@ -276,6 +266,7 @@ async def before_monitor():
 # ==========================================
 
 
+# 1. 일반 유저 등록
 @bot.tree.command(
     name="등록", description="본인의 WOS UID와 서버 번호(왕국)를 등록합니다."
 )
@@ -302,6 +293,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     await interaction.response.send_message(embed=embed)
 
 
+# 2. 내 정보 확인
 @bot.tree.command(
     name="내정보", description="현재 등록되어 있는 내 정보를 확인합니다."
 )
@@ -323,6 +315,7 @@ async def my_info(interaction: discord.Interaction):
         )
 
 
+# 3. 히스토리 확인
 @bot.tree.command(
     name="히스토리",
     description="최근 봇이 처리한 기프트코드 교환 내역을 확인합니다.",
@@ -358,6 +351,7 @@ async def show_history(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# 4. 등록 인원 요약
 @bot.tree.command(
     name="유저목록",
     description="현재 자동 교환에 등록된 총 유저 수 현황을 확인합니다.",
@@ -374,11 +368,87 @@ async def user_count(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# 5. [관리자 전용] 등록된 특정 유저 삭제
+@bot.tree.command(
+    name="유저삭제", description="[관리자] 특정 유저의 등록 정보를 삭제합니다."
+)
+@app_commands.describe(target_user="삭제할 디스코드 유저")
+@app_commands.checks.has_permissions(administrator=True)
+async def delete_user(
+    interaction: discord.Interaction, target_user: discord.User
+):
+    discord_id = str(target_user.id)
+
+    cursor.execute(
+        "SELECT uid FROM users WHERE discord_id = ?", (discord_id,)
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        await interaction.response.send_message(
+            f"❌ {target_user.mention}님은 등록된 정보가 없습니다.",
+            ephemeral=True,
+        )
+        return
+
+    cursor.execute(
+        "DELETE FROM users WHERE discord_id = ?", (discord_id,)
+    )
+    conn.commit()
+
+    embed = discord.Embed(
+        title="🗑️ 유저 정보 삭제 완료",
+        description=f"{target_user.mention}님의 등록 정보(UID: `{row[0]}`)를 DB에서 삭제했습니다.",
+        color=0xE74C3C,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# 6. [관리자 전용] 등록된 전체 유저 상세 명단 조회
+@bot.tree.command(
+    name="전체유저목록",
+    description="[관리자] DB에 등록된 전체 유저 명단을 조회합니다.",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def full_user_list(interaction: discord.Interaction):
+    cursor.execute("SELECT discord_id, uid, server FROM users")
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message(
+            "📋 현재 DB에 등록된 유저가 없습니다.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"📋 등록 유저 명단 (총 {len(rows)}명)", color=0x34495E
+    )
+
+    description_text = ""
+    for idx, (discord_id, uid, server) in enumerate(rows, 1):
+        description_text += (
+            f"**{idx}.** <@{discord_id}> | UID: `{uid}` | 왕국: `{server}`번\n"
+        )
+
+        if idx % 15 == 0 or idx == len(rows):
+            embed.description = description_text
+            if idx <= 15:
+                await interaction.response.send_message(
+                    embed=embed, ephemeral=True
+                )
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            embed = discord.Embed(color=0x34495E)
+            description_text = ""
+
+
+# 7. [관리자 전용] 수동 쿠폰 발송
 @bot.tree.command(
     name="쿠폰발송",
     description="[관리자] 기프트코드를 입력하여 전체 유저에게 일괄 등록합니다.",
 )
 @app_commands.describe(gift_code="교환할 기프트코드")
+@app_commands.checks.has_permissions(administrator=True)
 async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(
         f"⏳ 기프트코드(`{gift_code}`) 수동 발송 작업을 시작합니다..."
@@ -386,6 +456,22 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     asyncio.create_task(
         process_mass_redeem(gift_code, interaction.channel)
     )
+
+
+# ==========================================
+# ⚠️ 관리자 권한 예외 처리 에러 핸들러
+# ==========================================
+@delete_user.error
+@full_user_list.error
+@manual_redeem.error
+async def admin_command_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "🚫 이 명령어는 **서버 관리자** 권한이 있는 분만 사용하실 수 있습니다.",
+            ephemeral=True,
+        )
 
 
 # ==========================================
