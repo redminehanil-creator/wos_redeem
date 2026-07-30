@@ -102,36 +102,46 @@ bot = WOSBot()
 # 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(page, uid: str, server: int, gift_code: str, max_retries: int = 2) -> bool:
-    """WOS 공식 교환 페이지 입력 자동화 (타임아웃 및 요소 선택 강화)"""
+    """WOS 공식 교환 사이트 2단계(로그인 -> 교환) 정밀 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 페이지 접속 (타임아웃 15초)
+            # 1. 사이트 접속
             await page.goto("https://wos-giftcode.centurygame.com/", timeout=15000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(1500)
 
-            # 2. 플레이어 ID 입력 (placeholder 및 input 태그 유연 탐색)
-            player_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어'], input.id_input").first
-            await player_input.fill(str(uid), timeout=5000)
+            # 2. UID 입력창 찾기 및 입력
+            uid_input = page.locator("input[placeholder*='ID'], input[placeholder*='플레이어'], input.id_input").first
+            await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 교환 코드 입력
+            # 3. 로그인/확인 버튼 클릭 (닉네임 조회)
+            login_btn = page.locator("button:has-text('Confirm'), button:has-text('로그인'), div.login_btn, div:has-text('Confirm')").first
+            await login_btn.click(timeout=5000)
+            await page.wait_for_timeout(1500)
+
+            # 4. 쿠폰 코드 입력창 찾기 및 입력
             code_input = page.locator("input[placeholder*='코드'], input[placeholder*='Code'], input.code_input").first
             await code_input.fill(str(gift_code), timeout=5000)
 
-            # 4. 교환 버튼 클릭
-            confirm_btn = page.locator("div.exchange_btn, button.exchange_btn, div:has-text('교환'), div:has-text('Confirm')").first
-            await confirm_btn.click(timeout=5000)
+            # 5. 교환(Redeem) 버튼 클릭
+            redeem_btn = page.locator("button:has-text('Redeem'), button:has-text('교환'), div.exchange_btn, div:has-text('Redeem')").first
+            await redeem_btn.click(timeout=5000)
             await page.wait_for_timeout(2000)
 
+            # 6. 결과 페이지/팝업 내용 감지
             content = await page.content()
+            content_upper = content.upper()
 
-            # 성공 문구 확인
-            if "성공" in content or "SUCCESS" in content.upper() or "발송" in content or "Claimed" in content:
+            # 성공 및 이미 사용함/중복 처리 판정
+            if any(k in content for k in ["성공", "발송", "완료", "Claimed", "SUCCESS", "Congratulations"]):
                 return True
+            elif "ALREADY" in content_upper or "RECEIVED" in content_upper or "이미" in content:
+                print(f"ℹ️ [UID: {uid}] 이미 사용했거나 수령된 쿠폰입니다.")
+                return True  # 이미 받은 쿠폰도 성공 처리 원하시면 True
             else:
                 print(f"⚠️ [시도 {attempt}/{max_retries}] 교환 응답 미확인 (UID: {uid})")
 
         except Exception as e:
-            print(f"❌ [시도 {attempt}/{max_retries}] 웹 입력 중 에러 발생 (UID: {uid}): {e}")
+            print(f"❌ [시도 {attempt}/{max_retries}] 진행 중 에러 발생 (UID: {uid}): {e}")
 
         if attempt < max_retries:
             await asyncio.sleep(1)
