@@ -120,12 +120,12 @@ async def on_ready():
     print(f"✅ [{bot.user.name}] Discord online connection ready!")
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (타임아웃 방지 강화)
+# 🔄 Playwright 자동 입력 로직 (2항 적용: max_retries = 3)
 # ==========================================
 async def execute_redeem_with_page(
-    page, uid: str, server: int, gift_code: str, max_retries: int = 2
+    page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
+    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화 (재시도 3회로 강화)"""
     for attempt in range(1, max_retries + 1):
         try:
             if attempt == 1:
@@ -234,7 +234,7 @@ async def execute_redeem_with_page(
     return False
 
 # ==========================================
-# ⚡ 초고속 병렬 처리 대량 교환 로직
+# ⚡ 초고속 병렬 처리 대량 교환 로직 (1·3항 적용)
 # ==========================================
 async def process_mass_redeem(gift_code: str, target_channel):
     global cancel_mass_redeem
@@ -247,7 +247,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     gift_code = gift_code.strip()
 
-    # 1. 시트 데이터 로드 및 실패 시트 초기화
+    # 1. 시트 데이터 로드 및 실패 시트 초기화 (요청마다 초기화)
     try:
         raw_users = sheet_users.get_all_values()
         if len(raw_users) <= 1:
@@ -265,13 +265,12 @@ async def process_mass_redeem(gift_code: str, target_channel):
             for i, h in enumerate(headers):
                 if i < len(row):
                     user_dict[h] = str(row[i]).strip()
-            # 원본 row 전체 데이터 저장을 위해 raw_row 키 저장
             user_dict["_raw_row"] = row
             users_records.append(user_dict)
 
         used_codes_records = sheet_codes.get_all_records()
 
-        # 🧹 코드 입력 요청 들어왔을 때 failed_users 시트 초기화 (시트1 포맷 헤더 재설정)
+        # 🧹 코드 입력 시작 시 failed_users 시트 초기화
         if sheet_failed:
             sheet_failed.clear()
             header_row = raw_users[0] if raw_users else ["discord_id", "username", "uid", "server", "from"]
@@ -297,10 +296,11 @@ async def process_mass_redeem(gift_code: str, target_channel):
     success_count = 0
     fail_count = 0
     processed_count = 0
-    failed_users_list = []  # 실패 리스트 모음
+    pass1_failed_list = []  # 1차 실패 명단 모음
     lock = asyncio.Lock()
 
-    CONCURRENCY_LIMIT = 3
+    # 💡 1항 적용: 동시 처리를 2개로 조정하여 안정성 향상
+    CONCURRENCY_LIMIT = 2
     queue = asyncio.Queue()
 
     for user in users_records:
@@ -329,13 +329,12 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 async with lock:
                     fail_count += 1
                     processed_count += 1
-                    if user.get("_raw_row"):
-                        failed_users_list.append(user)
+                    pass1_failed_list.append(user)
                 queue.task_done()
                 continue
 
             try:
-                is_success = await execute_redeem_with_page(page, str(uid), server, gift_code)
+                is_success = await execute_redeem_with_page(page, str(uid), server, gift_code, max_retries=3)
             except Exception as e:
                 print(f"❌ Exception occurred (UID: {uid}): {e}")
                 is_success = False
@@ -345,21 +344,14 @@ async def process_mass_redeem(gift_code: str, target_channel):
                     success_count += 1
                 else:
                     fail_count += 1
-                    failed_users_list.append(user)
-                    
-                    # 📝 실패 시 시트1 포맷 그대로 failed_users 시트에 행 추가
-                    if sheet_failed and user.get("_raw_row"):
-                        try:
-                            sheet_failed.append_row(user["_raw_row"])
-                        except Exception as s_err:
-                            print(f"⚠️ Failed sheet append error: {s_err}")
+                    pass1_failed_list.append(user)
 
                 processed_count += 1
 
                 if status_msg and (processed_count % 5 == 0 or processed_count == total_users):
                     try:
                         await status_msg.edit(
-                            content=f"🔄 **Processing Auto Redeem...** [`{gift_code}`] [{processed_count}/{total_users}]\n✅ Success: {success_count} | ❌ Failed: {fail_count}"
+                            content=f"🔄 **Processing Auto Redeem (Pass 1)...** [`{gift_code}`] [{processed_count}/{total_users}]\n✅ Success: {success_count} | ❌ Failed: {fail_count}"
                         )
                     except Exception:
                         pass
@@ -382,7 +374,66 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 3. 결과 처리 및 완료 코멘트 출력
+    # 💡 3항 적용: 1차에서 실패한 계정이 존재하면 2차 순차 재도전 실시
+    final_failed_list = []
+
+    if pass1_failed_list and not cancel_mass_redeem:
+        if status_msg:
+            try:
+                await status_msg.edit(
+                    content=f"🔄 1차 교환 완료! (성공: {success_count} / 실패: {fail_count})\n"
+                            f"⏳ **실패한 {len(pass1_failed_list)}개 계정에 대해 2차 재시도를 진행합니다...**"
+                )
+            except Exception:
+                pass
+
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = await context.new_page()
+
+                for f_user in pass1_failed_list:
+                    if cancel_mass_redeem:
+                        break
+
+                    f_uid = f_user.get("uid")
+                    f_server = f_user.get("server")
+
+                    if not f_uid or not f_server:
+                        final_failed_list.append(f_user)
+                        continue
+
+                    # 2차 재시도 (아주 천천히 1개씩 안정적으로 수행)
+                    retry_success = await execute_redeem_with_page(page, str(f_uid), f_server, gift_code, max_retries=3)
+
+                    if retry_success:
+                        success_count += 1
+                        fail_count -= 1
+                        print(f"🎉 [2차 재시도 성공!] UID: {f_uid}")
+                    else:
+                        final_failed_list.append(f_user)
+
+                await page.close()
+                await browser.close()
+        except Exception as retry_err:
+            print(f"❌ 2차 재시도 루프 에러: {retry_err}")
+            final_failed_list = pass1_failed_list
+    else:
+        final_failed_list = pass1_failed_list
+
+    # 📝 2차 재시도까지 거친 후 최종 실패한 명단만 구글 시트(failed_users)에 기록
+    if sheet_failed and final_failed_list:
+        for f_user in final_failed_list:
+            if f_user.get("_raw_row"):
+                try:
+                    sheet_failed.append_row(f_user["_raw_row"])
+                except Exception as s_err:
+                    print(f"⚠️ Failed sheet append error: {s_err}")
+
+    # 4. 최종 결과 처리 및 완료 코멘트 출력
     if cancel_mass_redeem:
         if target_channel:
             await target_channel.send(
@@ -403,20 +454,20 @@ async def process_mass_redeem(gift_code: str, target_channel):
         embed.add_field(name="Gift Code", value=f"`{gift_code}`", inline=False)
         embed.add_field(name="Summary", value=f"Total Accounts: **{total_users}**\nSuccess: **{success_count}** | Failed: **{fail_count}**", inline=False)
 
-        # 📋 완료 코멘트에 실패 목록 띄워주기
-        if failed_users_list:
+        # 📋 완료 코멘트에 끝까지 실패한 최종 목록 띄우기
+        if final_failed_list:
             failed_text_list = []
-            for f_user in failed_users_list[:15]:  # 메시지 길이 제한 대비 최대 15개 텍스트 렌더링
+            for f_user in final_failed_list[:15]:
                 f_uid = f_user.get("uid", "N/A")
                 f_server = f_user.get("server", "N/A")
                 f_name = f_user.get("username", "")
                 failed_text_list.append(f"• UID: `{f_uid}` (State: `#{f_server}` / {f_name})")
             
             failed_str = "\n".join(failed_text_list)
-            if len(failed_users_list) > 15:
-                failed_str += f"\n...외 {len(failed_users_list) - 15}개 계정 (구글 시트 `failed_users` 탭 참조)"
+            if len(final_failed_list) > 15:
+                failed_str += f"\n...외 {len(final_failed_list) - 15}개 계정 (구글 시트 `failed_users` 탭 참조)"
 
-            embed.add_field(name="⚠️ Failed Account List", value=failed_str, inline=False)
+            embed.add_field(name="⚠️ Final Failed Account List", value=failed_str, inline=False)
 
         if target_channel:
             await target_channel.send(embed=embed)
