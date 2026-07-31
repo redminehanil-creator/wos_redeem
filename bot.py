@@ -120,12 +120,12 @@ async def on_ready():
     print(f"✅ [{bot.user.name}] Discord online connection ready!")
 
 # ==========================================
-# 🔄 Playwright 자동 입력 로직 (2항 적용: max_retries = 3)
+# 🔄 Playwright 자동 입력 로직
 # ==========================================
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화 (재시도 3회로 강화)"""
+    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
             if attempt == 1:
@@ -234,7 +234,7 @@ async def execute_redeem_with_page(
     return False
 
 # ==========================================
-# ⚡ 초고속 병렬 처리 대량 교환 로직 (1·3항 적용)
+# ⚡ 초고속 병렬 처리 대량 교환 로직
 # ==========================================
 async def process_mass_redeem(gift_code: str, target_channel):
     global cancel_mass_redeem
@@ -247,7 +247,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     gift_code = gift_code.strip()
 
-    # 1. 시트 데이터 로드 및 실패 시트 초기화 (요청마다 초기화)
     try:
         raw_users = sheet_users.get_all_values()
         if len(raw_users) <= 1:
@@ -270,7 +269,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
         used_codes_records = sheet_codes.get_all_records()
 
-        # 🧹 코드 입력 시작 시 failed_users 시트 초기화
         if sheet_failed:
             sheet_failed.clear()
             header_row = raw_users[0] if raw_users else ["discord_id", "username", "uid", "server", "from"]
@@ -282,7 +280,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
             await target_channel.send(f"❌ Error reading Google Sheet data: {e}")
         return
 
-    # 2. 중복 코드 확인
     if any(str(row.get('code')).strip() == gift_code for row in used_codes_records):
         if target_channel:
             await target_channel.send(f"⚠️ Gift code `{gift_code}` has already been processed.")
@@ -296,10 +293,9 @@ async def process_mass_redeem(gift_code: str, target_channel):
     success_count = 0
     fail_count = 0
     processed_count = 0
-    pass1_failed_list = []  # 1차 실패 명단 모음
+    pass1_failed_list = []
     lock = asyncio.Lock()
 
-    # 💡 1항 적용: 동시 처리를 2개로 조정하여 안정성 향상
     CONCURRENCY_LIMIT = 2
     queue = asyncio.Queue()
 
@@ -374,7 +370,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 💡 3항 적용: 1차에서 실패한 계정이 존재하면 2차 순차 재도전 실시
+    # 2차 재시도 로직
     final_failed_list = []
 
     if pass1_failed_list and not cancel_mass_redeem:
@@ -406,7 +402,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                         final_failed_list.append(f_user)
                         continue
 
-                    # 2차 재시도 (아주 천천히 1개씩 안정적으로 수행)
                     retry_success = await execute_redeem_with_page(page, str(f_uid), f_server, gift_code, max_retries=3)
 
                     if retry_success:
@@ -424,7 +419,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
     else:
         final_failed_list = pass1_failed_list
 
-    # 📝 2차 재시도까지 거친 후 최종 실패한 명단만 구글 시트(failed_users)에 기록
     if sheet_failed and final_failed_list:
         for f_user in final_failed_list:
             if f_user.get("_raw_row"):
@@ -433,7 +427,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 except Exception as s_err:
                     print(f"⚠️ Failed sheet append error: {s_err}")
 
-    # 4. 최종 결과 처리 및 완료 코멘트 출력
     if cancel_mass_redeem:
         if target_channel:
             await target_channel.send(
@@ -454,7 +447,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
         embed.add_field(name="Gift Code", value=f"`{gift_code}`", inline=False)
         embed.add_field(name="Summary", value=f"Total Accounts: **{total_users}**\nSuccess: **{success_count}** | Failed: **{fail_count}**", inline=False)
 
-        # 📋 완료 코멘트에 끝까지 실패한 최종 목록 띄우기
         if final_failed_list:
             failed_text_list = []
             for f_user in final_failed_list[:15]:
@@ -586,7 +578,7 @@ async def my_info(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
 
-# 3. Delete Specific UID
+# 3. Delete Specific UID (일반 유저용 - 본인 계정의 UID만 지우기)
 @bot.tree.command(name="wr_deleteinfo", description="Delete a specific registered UID from your account.")
 @app_commands.describe(uid="Player UID to delete")
 async def delete_my_uid(interaction: discord.Interaction, uid: str):
@@ -602,6 +594,7 @@ async def delete_my_uid(interaction: discord.Interaction, uid: str):
 
     if len(raw_users) > 1:
         for idx, row in enumerate(raw_users[1:], 2):
+            # 본인 discord_id와 UID가 일치하는 행만 탐색
             if len(row) >= 3 and str(row[0]).strip() == discord_id and str(row[2]).strip() == uid_str:
                 row_to_delete = idx
                 break
@@ -658,37 +651,42 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...", ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 7. [Admin] Delete Specific User Entirely
-@bot.tree.command(name="wr_deleteuser", description="[Admin] Delete all registered data for a specific Discord user.")
-@app_commands.describe(target_user="Discord user to delete")
+# 7. [Admin] Delete Specific User/UID (관리자용 - 특정 UID 강제 지우기)
+@bot.tree.command(name="wr_deleteuser", description="[Admin] Delete a specific registered UID from the database.")
+@app_commands.describe(uid="Player UID to delete from DB")
 @app_commands.checks.has_permissions(administrator=True)
-async def delete_user(interaction: discord.Interaction, target_user: discord.User):
+async def delete_user(interaction: discord.Interaction, uid: str):
     if not sheet_users:
         await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
-    discord_id = str(target_user.id)
+    target_uid = str(uid).strip()
     raw_users = sheet_users.get_all_values()
 
-    rows_to_delete = []
+    row_to_delete = None
     if len(raw_users) > 1:
         for idx, row in enumerate(raw_users[1:], 2):
-            if len(row) > 0 and str(row[0]).strip() == discord_id:
-                rows_to_delete.append(idx)
+            if len(row) >= 3 and str(row[2]).strip() == target_uid:
+                row_to_delete = idx
+                break
 
-    if not rows_to_delete:
-        await interaction.response.send_message(f"❌ {target_user.mention} has no registered data.", ephemeral=True)
+    if not row_to_delete:
+        await interaction.response.send_message(f"❌ UID `{target_uid}` was not found in the database.", ephemeral=True)
         return
 
-    for r in reversed(rows_to_delete):
-        sheet_users.delete_rows(r)
+    sheet_users.delete_rows(row_to_delete)
 
     embed = discord.Embed(
         title="🗑️ User Data Deleted",
-        description=f"Deleted all registered accounts (Total: {len(rows_to_delete)}) for {target_user.mention}.",
+        description=f"Admin successfully deleted UID `{target_uid}` from the database.",
         color=0xE74C3C
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@delete_user.error
+async def delete_user_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("🚫 This command requires Administrator permissions.", ephemeral=True)
 
 # 8. 대량 교환 강제 중단 커맨드
 @bot.tree.command(name="wr_stop", description="진행 중인 대량 쿠폰 교환 작업을 강제 중단합니다.")
