@@ -48,6 +48,7 @@ scope = [
 
 sheet_users = None
 sheet_codes = None
+sheet_failed = None
 
 try:
     if GOOGLE_JSON_RAW:
@@ -62,7 +63,19 @@ try:
     sh = gc.open(SPREADSHEET_NAME)
 
     sheet_users = sh.sheet1
-    sheet_codes = sh.worksheet("used_codes")
+    
+    try:
+        sheet_codes = sh.worksheet("used_codes")
+    except gspread.exceptions.WorksheetNotFound:
+        sheet_codes = sh.add_worksheet(title="used_codes", rows="1000", cols="3")
+        sheet_codes.append_row(["code", "result_summary", "used_at"])
+
+    try:
+        sheet_failed = sh.worksheet("failed_users")
+    except gspread.exceptions.WorksheetNotFound:
+        sheet_failed = sh.add_worksheet(title="failed_users", rows="1000", cols="5")
+        sheet_failed.append_row(["discord_id", "username", "uid", "server", "from"])
+
     print("✅ 구글 시트 데이터베이스 연동 성공!")
 except Exception as e:
     print(f"❌ [초기화 에러] 구글 시트 연동 실패: {e}")
@@ -112,10 +125,9 @@ async def on_ready():
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 2
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화 (타임아웃 강화)"""
+    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
-            # 1. 사이트 접속 (2번째 시도부터는 reload로 확실히 다시 읽어옴)
             if attempt == 1:
                 await page.goto(
                     "https://wos-giftcode.centurygame.com/",
@@ -127,20 +139,17 @@ async def execute_redeem_with_page(
 
             await page.wait_for_timeout(1500)
 
-            # 2. 플레이어 ID 입력 (타임아웃 15초로 상향)
             uid_input = page.locator(
                 "input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']"
             ).first
             await uid_input.wait_for(state="attached", timeout=15000)
             await uid_input.fill(str(uid), timeout=5000)
 
-            # 3. 왕국(서버) 입력
             server_input = page.locator(
                 "input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
             ).first
             await server_input.fill(str(server), timeout=5000)
 
-            # 4. 교환 코드 입력
             code_input = page.locator(
                 "input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']"
             ).first
@@ -148,14 +157,11 @@ async def execute_redeem_with_page(
 
             await page.wait_for_timeout(500)
 
-            # 5. 교환 확인 버튼 클릭
             exchange_btn = page.locator("div.exchange_btn").first
             await exchange_btn.click(timeout=5000)
 
-            # 6. 결과 팝업 대기
             await page.wait_for_timeout(2500)
 
-            # 7. 모달 팝업 내부 메시지 탐색
             msg_element = page.locator("p.msg, div.modal_content").first
             popup_text = ""
 
@@ -168,7 +174,6 @@ async def execute_redeem_with_page(
             popup_text_upper = popup_text_clean.upper()
             print(f"🔍 [UID: {uid}] Popup Text: {popup_text_clean}")
 
-            # A. 성공 케이스
             if any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -184,7 +189,6 @@ async def execute_redeem_with_page(
                 print(f"✅ [UID: {uid} / State: {server}] Redeem Success!")
                 return True
 
-            # B. 이미 수령한 케이스 (성공으로 간주)
             elif any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -199,7 +203,6 @@ async def execute_redeem_with_page(
                 print(f"ℹ️ [UID: {uid}] Already claimed code. (Marked as Success)")
                 return True
 
-            # C. 명확한 실패 케이스
             elif any(
                 k in popup_text or k in popup_text_upper
                 for k in [
@@ -244,7 +247,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
     gift_code = gift_code.strip()
 
-    # 1. 시트 데이터 로드
+    # 1. 시트 데이터 로드 및 실패 시트 초기화
     try:
         raw_users = sheet_users.get_all_values()
         if len(raw_users) <= 1:
@@ -262,9 +265,17 @@ async def process_mass_redeem(gift_code: str, target_channel):
             for i, h in enumerate(headers):
                 if i < len(row):
                     user_dict[h] = str(row[i]).strip()
+            # 원본 row 전체 데이터 저장을 위해 raw_row 키 저장
+            user_dict["_raw_row"] = row
             users_records.append(user_dict)
 
         used_codes_records = sheet_codes.get_all_records()
+
+        # 🧹 코드 입력 요청 들어왔을 때 failed_users 시트 초기화 (시트1 포맷 헤더 재설정)
+        if sheet_failed:
+            sheet_failed.clear()
+            header_row = raw_users[0] if raw_users else ["discord_id", "username", "uid", "server", "from"]
+            sheet_failed.append_row(header_row)
 
     except Exception as e:
         print(f"❌ Failed to load Google Sheet data: {e}")
@@ -286,6 +297,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     success_count = 0
     fail_count = 0
     processed_count = 0
+    failed_users_list = []  # 실패 리스트 모음
     lock = asyncio.Lock()
 
     CONCURRENCY_LIMIT = 3
@@ -317,6 +329,8 @@ async def process_mass_redeem(gift_code: str, target_channel):
                 async with lock:
                     fail_count += 1
                     processed_count += 1
+                    if user.get("_raw_row"):
+                        failed_users_list.append(user)
                 queue.task_done()
                 continue
 
@@ -331,6 +345,15 @@ async def process_mass_redeem(gift_code: str, target_channel):
                     success_count += 1
                 else:
                     fail_count += 1
+                    failed_users_list.append(user)
+                    
+                    # 📝 실패 시 시트1 포맷 그대로 failed_users 시트에 행 추가
+                    if sheet_failed and user.get("_raw_row"):
+                        try:
+                            sheet_failed.append_row(user["_raw_row"])
+                        except Exception as s_err:
+                            print(f"⚠️ Failed sheet append error: {s_err}")
+
                 processed_count += 1
 
                 if status_msg and (processed_count % 5 == 0 or processed_count == total_users):
@@ -359,7 +382,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 3. 결과 처리
+    # 3. 결과 처리 및 완료 코멘트 출력
     if cancel_mass_redeem:
         if target_channel:
             await target_channel.send(
@@ -379,6 +402,21 @@ async def process_mass_redeem(gift_code: str, target_channel):
         embed = discord.Embed(title="🎁 Gift Code Auto Redemption Completed", color=0x00FF00)
         embed.add_field(name="Gift Code", value=f"`{gift_code}`", inline=False)
         embed.add_field(name="Summary", value=f"Total Accounts: **{total_users}**\nSuccess: **{success_count}** | Failed: **{fail_count}**", inline=False)
+
+        # 📋 완료 코멘트에 실패 목록 띄워주기
+        if failed_users_list:
+            failed_text_list = []
+            for f_user in failed_users_list[:15]:  # 메시지 길이 제한 대비 최대 15개 텍스트 렌더링
+                f_uid = f_user.get("uid", "N/A")
+                f_server = f_user.get("server", "N/A")
+                f_name = f_user.get("username", "")
+                failed_text_list.append(f"• UID: `{f_uid}` (State: `#{f_server}` / {f_name})")
+            
+            failed_str = "\n".join(failed_text_list)
+            if len(failed_users_list) > 15:
+                failed_str += f"\n...외 {len(failed_users_list) - 15}개 계정 (구글 시트 `failed_users` 탭 참조)"
+
+            embed.add_field(name="⚠️ Failed Account List", value=failed_str, inline=False)
 
         if target_channel:
             await target_channel.send(embed=embed)
