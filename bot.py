@@ -578,7 +578,7 @@ async def my_info(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
 
-# 3. Delete Specific UID (일반 유저용 - 본인 계정의 UID만 지우기)
+# 3. Delete Specific UID (일반 유저용)
 @bot.tree.command(name="wr_deleteinfo", description="Delete a specific registered UID from your account.")
 @app_commands.describe(uid="Player UID to delete")
 async def delete_my_uid(interaction: discord.Interaction, uid: str):
@@ -594,7 +594,6 @@ async def delete_my_uid(interaction: discord.Interaction, uid: str):
 
     if len(raw_users) > 1:
         for idx, row in enumerate(raw_users[1:], 2):
-            # 본인 discord_id와 UID가 일치하는 행만 탐색
             if len(row) >= 3 and str(row[0]).strip() == discord_id and str(row[2]).strip() == uid_str:
                 row_to_delete = idx
                 break
@@ -651,7 +650,7 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...", ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 7. [Admin] Delete Specific User/UID (관리자용 - 특정 UID 강제 지우기)
+# 7. [Admin] Delete Specific User/UID (관리자용)
 @bot.tree.command(name="wr_deleteuser", description="[Admin] Delete a specific registered UID from the database.")
 @app_commands.describe(uid="Player UID to delete from DB")
 @app_commands.checks.has_permissions(administrator=True)
@@ -688,7 +687,29 @@ async def delete_user_error(interaction: discord.Interaction, error: app_command
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("🚫 This command requires Administrator permissions.", ephemeral=True)
 
-# 8. 대량 교환 강제 중단 커맨드
+# 8. [Admin] 타인 서버 강제 퇴장 커맨드
+@bot.tree.command(name="wr_leave_others", description="[Admin] 내 서버를 제외한 다른 서버에서 봇을 퇴장시킵니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def leave_other_guilds(interaction: discord.Interaction):
+    current_guild_id = interaction.guild_id  # 명령어를 친 내 서버 ID
+    
+    left_count = 0
+    for guild in bot.guilds:
+        if guild.id != current_guild_id:
+            await guild.leave()
+            left_count += 1
+
+    await interaction.response.send_message(
+        f"🧹 현재 서버를 제외한 **{left_count}개 타인 서버**에서 봇이 성공적으로 퇴장했습니다!", 
+        ephemeral=True
+    )
+
+@leave_other_guilds.error
+async def leave_other_guilds_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("🚫 This command requires Administrator permissions.", ephemeral=True)
+
+# 9. 대량 교환 강제 중단 커맨드
 @bot.tree.command(name="wr_stop", description="진행 중인 대량 쿠폰 교환 작업을 강제 중단합니다.")
 async def stop_redeem(interaction: discord.Interaction):
     global cancel_mass_redeem
