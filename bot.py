@@ -14,30 +14,22 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
-# 1. 포트 타임아웃 방지용 Flask 웹 서버 즉시 가동
+# ==========================================
+# 🌐 Render 포트 타임아웃 방지용 최우선 Web Server
+# ==========================================
 web_app = Flask('')
 
 @web_app.route('/')
 def home():
-    return "Bot is alive and running!"
+    return "WOS Discord Bot is Active and Running!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
-web_thread = threading.Thread(target=run_web, daemon=True)
+web_thread = Thread(target=run_web, daemon=True)
 web_thread.start()
-print("🌐 [Web] Uptime web server started on port 10000.")
-
-# ==========================================
-# ⚡ 브라우저 자동 검사/설치
-# ==========================================
-try:
-    #print("🌐 Playwright 브라우저 검사 진행...")
-    #subprocess.run(["python", "-m", "playwright", "install"], check=False)
-    pass
-except Exception as e:
-    print(f"⚠️ 브라우저 설치 과정 스킵/경고: {e}")
+print("🌐 [Web] Uptime web server started immediately on port 10000.")
 
 # ==========================================
 # ⚙️ 기본 설정 구역
@@ -45,13 +37,12 @@ except Exception as e:
 sys.stdout.reconfigure(line_buffering=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_DISCORD_BOT_TOKEN_HERE")
-MONITOR_CHANNEL_ID = 973162050333327390  # 모니터링 채널 ID
-REPORT_CHANNEL_ID = 1532160917943484626   # 결과 보고 채널 ID
+MONITOR_CHANNEL_ID = 973162050333327390   # 모니터링 채널 ID
+REPORT_CHANNEL_ID = 1532160917943484626    # 결과 보고 채널 ID
 
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "wos_bot_db")
 GOOGLE_JSON_RAW = os.environ.get("GOOGLE_JSON", "")
 
-# 🛑 대량 교환 강제 중단 플래그
 cancel_mass_redeem = False
 
 # ==========================================
@@ -97,24 +88,6 @@ except Exception as e:
     print(f"❌ [초기화 에러] 구글 시트 연동 실패: {e}")
 
 # ==========================================
-# 🌐 Render 유지용 Web Server
-# ==========================================
-web_app = Flask('')
-
-@web_app.route('/')
-def home():
-    return "WOS Discord Bot is Active and Running!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    web_app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
-
-# ==========================================
 # 🤖 디스코드 봇 클래스 정의
 # ==========================================
 class WOSBot(commands.Bot):
@@ -141,7 +114,6 @@ async def on_ready():
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
-    """한글/영문 모든 입력창 및 성공/실패/중복 팝업 완벽 대응 자동화"""
     for attempt in range(1, max_retries + 1):
         try:
             if attempt == 1:
@@ -386,7 +358,6 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
-    # 2차 재시도 로직
     final_failed_list = []
 
     if pass1_failed_list and not cancel_mass_redeem:
@@ -512,15 +483,17 @@ async def before_monitor():
     await bot.wait_until_ready()
 
 # ==========================================
-# 💬 영문 슬래시 커맨드 구역 (wr_ 접두사 적용)
+# 💬 영문 슬래시 커맨드 구역 (defer 추가로 3초 타임아웃 방지)
 # ==========================================
 
 # 1. Register Account / Alt
 @bot.tree.command(name="wr_register", description="Register your WOS UID and State (Kingdom) number. (Allows multiple alts)")
 @app_commands.describe(uid="Player ID (Digits)", server="State / Kingdom Number (Digits)")
 async def register(interaction: discord.Interaction, uid: str, server: int):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_users:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     discord_id = str(interaction.user.id)
@@ -546,7 +519,7 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
             sheet_users.update_cell(row_idx, 4, str(server))
             sheet_users.update_cell(row_idx, 5, guild_name)
             
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"🔄 **{username}**'s UID `{uid_str}` has been updated to State `{server}` (From: **{guild_name}**).",
                 ephemeral=True
             )
@@ -563,13 +536,15 @@ async def register(interaction: discord.Interaction, uid: str, server: int):
     embed.add_field(name="State (Kingdom)", value=f"#{server}", inline=True)
     embed.add_field(name="Server (From)", value=guild_name, inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # 2. Check My Accounts
 @bot.tree.command(name="wr_myinfo", description="View all registered UIDs and State numbers for your account.")
 async def my_info(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_users:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     discord_id = str(interaction.user.id)
@@ -590,16 +565,18 @@ async def my_info(interaction: discord.Interaction):
         )
         for idx, (uid, server) in enumerate(my_accounts, 1):
             embed.add_field(name=f"Account #{idx}", value=f"UID: `{uid}` / State: `#{server}`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
+        await interaction.followup.send("❌ No registered account found. Use `/wr_register [UID] [State]` to register.", ephemeral=True)
 
-# 3. Delete Specific UID (일반 유저용)
+# 3. Delete Specific UID
 @bot.tree.command(name="wr_deleteinfo", description="Delete a specific registered UID from your account.")
 @app_commands.describe(uid="Player UID to delete")
 async def delete_my_uid(interaction: discord.Interaction, uid: str):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_users:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     discord_id = str(interaction.user.id)
@@ -616,20 +593,22 @@ async def delete_my_uid(interaction: discord.Interaction, uid: str):
 
     if row_to_delete:
         sheet_users.delete_rows(row_to_delete)
-        await interaction.response.send_message(f"🗑️ Successfully deleted UID `{uid_str}` from your account.", ephemeral=True)
+        await interaction.followup.send(f"🗑️ Successfully deleted UID `{uid_str}` from your account.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ UID `{uid_str}` was not found in your registered accounts.", ephemeral=True)
+        await interaction.followup.send(f"❌ UID `{uid_str}` was not found in your registered accounts.", ephemeral=True)
 
 # 4. View Gift Code History
 @bot.tree.command(name="wr_history", description="Check recently processed gift code redemption history.")
 async def show_history(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_codes:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     records = sheet_codes.get_all_records()
     if not records:
-        await interaction.response.send_message("📜 No gift code redemption history found yet.", ephemeral=True)
+        await interaction.followup.send("📜 No gift code redemption history found yet.", ephemeral=True)
         return
 
     embed = discord.Embed(title="📜 Recent Gift Code Redemption History (Last 10)", color=0x9B59B6)
@@ -639,13 +618,15 @@ async def show_history(interaction: discord.Interaction):
             value=f"└ **Result:** {row.get('result_summary')}\n└ **Date:** {row.get('used_at')}",
             inline=False
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # 5. Total Registered User Count
 @bot.tree.command(name="wr_usercount", description="Check total registered accounts for auto redemption.")
 async def user_count(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_users:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     raw_users = sheet_users.get_all_values()
@@ -656,7 +637,7 @@ async def user_count(interaction: discord.Interaction):
         description=f"Currently **{count} account(s)** are registered for automatic redemption.",
         color=0x1ABC9C
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # 6. [Admin] Manual Redeem Code
 @bot.tree.command(name="wr_sendcoupon", description="[Admin] Manually trigger gift code redemption for all registered accounts.")
@@ -666,13 +647,15 @@ async def manual_redeem(interaction: discord.Interaction, gift_code: str):
     await interaction.response.send_message(f"⏳ Starting manual redemption for gift code (`{gift_code}`)...", ephemeral=True)
     asyncio.create_task(process_mass_redeem(gift_code, interaction.channel))
 
-# 7. [Admin] Delete Specific User/UID (관리자용)
+# 7. [Admin] Delete Specific User/UID
 @bot.tree.command(name="wr_deleteuser", description="[Admin] Delete a specific registered UID from the database.")
 @app_commands.describe(uid="Player UID to delete from DB")
 @app_commands.checks.has_permissions(administrator=True)
 async def delete_user(interaction: discord.Interaction, uid: str):
+    await interaction.response.defer(ephemeral=True)
+
     if not sheet_users:
-        await interaction.response.send_message("❌ Google Sheet DB is not connected.", ephemeral=True)
+        await interaction.followup.send("❌ Google Sheet DB is not connected.", ephemeral=True)
         return
 
     target_uid = str(uid).strip()
@@ -686,7 +669,7 @@ async def delete_user(interaction: discord.Interaction, uid: str):
                 break
 
     if not row_to_delete:
-        await interaction.response.send_message(f"❌ UID `{target_uid}` was not found in the database.", ephemeral=True)
+        await interaction.followup.send(f"❌ UID `{target_uid}` was not found in the database.", ephemeral=True)
         return
 
     sheet_users.delete_rows(row_to_delete)
@@ -696,7 +679,7 @@ async def delete_user(interaction: discord.Interaction, uid: str):
         description=f"Admin successfully deleted UID `{target_uid}` from the database.",
         color=0xE74C3C
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @delete_user.error
 async def delete_user_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -707,7 +690,7 @@ async def delete_user_error(interaction: discord.Interaction, error: app_command
 @bot.tree.command(name="wr_leave_others", description="[Admin] 내 서버를 제외한 다른 서버에서 봇을 퇴장시킵니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def leave_other_guilds(interaction: discord.Interaction):
-    current_guild_id = interaction.guild_id  # 명령어를 친 내 서버 ID
+    current_guild_id = interaction.guild_id
     
     left_count = 0
     for guild in bot.guilds:
@@ -736,5 +719,4 @@ async def stop_redeem(interaction: discord.Interaction):
 # 🚀 메인 실행
 # ==========================================
 if __name__ == "__main__":
-    keep_alive()
     bot.run(BOT_TOKEN)
