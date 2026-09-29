@@ -14,12 +14,28 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
+# 1. 포트 타임아웃 방지용 Flask 웹 서버 즉시 가동
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+web_thread = threading.Thread(target=run_web, daemon=True)
+web_thread.start()
+print("🌐 [Web] Uptime web server started on port 10000.")
+
 # ==========================================
 # ⚡ 브라우저 자동 검사/설치
 # ==========================================
 try:
-    print("🌐 Playwright 브라우저 검사 진행...")
-    subprocess.run(["python", "-m", "playwright", "install"], check=False)
+    #print("🌐 Playwright 브라우저 검사 진행...")
+    #subprocess.run(["python", "-m", "playwright", "install"], check=False)
+    pass
 except Exception as e:
     print(f"⚠️ 브라우저 설치 과정 스킵/경고: {e}")
 
