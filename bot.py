@@ -15,7 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.async_api import async_playwright
 
 # ==========================================
-# 🌐 Render 포트 타임아웃 방지용 최우선 Web Server
+# 🌐 Render 포트 타임아웃 방지용 최우선 Web Server (가장 먼저 실행)
 # ==========================================
 web_app = Flask('')
 
@@ -30,6 +30,20 @@ def run_web():
 web_thread = Thread(target=run_web, daemon=True)
 web_thread.start()
 print("🌐 [Web] Uptime web server started immediately on port 10000.")
+
+# ==========================================
+# ⚡ Playwright 브라우저 내부 경로 고정 및 자동 검사
+# ==========================================
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.getcwd(), ".playwright")
+browser_dir = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
+
+if not os.path.exists(browser_dir) or not os.listdir(browser_dir):
+    print("🌐 [Init] Playwright 브라우저가 없어 프로젝트 폴더에 다운로드합니다...")
+    try:
+        subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
+        print("✅ [Init] Playwright Chromium 설치 완료!")
+    except Exception as e:
+        print(f"⚠️ [Init] 브라우저 설치 중 오류 발생: {e}")
 
 # ==========================================
 # ⚙️ 기본 설정 구역
