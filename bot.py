@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import subprocess
+import time
 from datetime import datetime
 from threading import Thread
 import discord
@@ -58,6 +59,29 @@ SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "wos_bot_db")
 GOOGLE_JSON_RAW = os.environ.get("GOOGLE_JSON", "")
 
 cancel_mass_redeem = False
+
+# 사이트 방화벽(Akamai 등) 차단 시, 이 시각(monotonic)까지 자동 모니터링 재시도를 쉰다.
+BLOCK_COOLDOWN_SEC = 30 * 60
+blocked_until = 0.0
+
+BLOCK_TITLE_KEYWORDS = ["access denied", "just a moment", "attention required", "forbidden"]
+BLOCK_BODY_KEYWORDS = ["access denied", "errors.edgesuite.net", "you don't have permission to access"]
+
+
+class AccessBlockedError(Exception):
+    """대상 사이트가 접속을 차단(Access Denied 등)한 경우."""
+
+
+async def is_blocked_page(page) -> bool:
+    try:
+        title = (await page.title()).lower()
+        if any(k in title for k in BLOCK_TITLE_KEYWORDS):
+            return True
+        body = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        body = body.lower()[:1000]
+        return any(k in body for k in BLOCK_BODY_KEYWORDS)
+    except Exception:
+        return False
 
 # ==========================================
 # 📊 구글 시트 DB 세팅
@@ -184,8 +208,10 @@ async def execute_redeem_with_page(
             page_title = await page.title()
             print(f"📄 [UID: {uid}] Page Title: '{page_title}'")
 
-            if any(cf in page_title for cf in ["Just a moment", "Cloudflare", "Attention Required"]):
-                print(f"🚨 [UID: {uid}] Cloudflare 차단 화면 감지됨.")
+            if await is_blocked_page(page):
+                print(f"🚨 [UID: {uid}] 사이트 접속 차단 화면 감지됨 (title='{page_title}'). 재시도 없이 중단합니다.")
+                await log_page_diagnostics(page, uid)
+                raise AccessBlockedError(page_title)
 
             # 입력 필드 대기 (visible 상태 대기)
             uid_input = page.locator("input[placeholder*='ID']").first
@@ -193,6 +219,8 @@ async def execute_redeem_with_page(
                 await uid_input.wait_for(state="visible", timeout=15000)
             except Exception:
                 await log_page_diagnostics(page, uid)
+                if await is_blocked_page(page):
+                    raise AccessBlockedError(page_title)
                 raise
             await uid_input.fill(str(uid), timeout=5000)
 
@@ -274,6 +302,8 @@ async def execute_redeem_with_page(
             else:
                 print(f"⚠️ [Attempt {attempt}/{max_retries}] Unknown popup message (UID: {uid})")
 
+        except AccessBlockedError:
+            raise
         except Exception as e:
             print(
                 f"❌ [Attempt {attempt}/{max_retries}] Error occurred (UID: {uid}): {e}"
@@ -283,6 +313,30 @@ async def execute_redeem_with_page(
             await asyncio.sleep(1.5)
 
     return False
+
+async def handle_blocked(gift_code, target_channel, status_msg, processed_count, total_users):
+    """차단 감지 시: 코드를 used_codes에 기록하지 않고(나중에 재시도 가능), 쿨다운을 걸고 알린다."""
+    global blocked_until
+    blocked_until = time.monotonic() + BLOCK_COOLDOWN_SEC
+    print(f"🚫 사이트 접속 차단됨. 코드 `{gift_code}` 는 기록하지 않고 {BLOCK_COOLDOWN_SEC // 60}분간 자동 재시도를 쉽니다.")
+
+    msg = (
+        f"🚫 **교환 사이트가 이 서버의 접속을 차단했습니다 (Access Denied).**\n"
+        f"- 코드: `{gift_code}` (처리 기록 안 함 → 환경 해결 후 다시 시도 가능)\n"
+        f"- 처리된 계정: **{processed_count} / {total_users}**\n"
+        f"- 자동 모니터링은 {BLOCK_COOLDOWN_SEC // 60}분간 쉽니다. 실행 환경(IP) 확인이 필요합니다."
+    )
+    if status_msg:
+        try:
+            await status_msg.edit(content=msg)
+            return
+        except Exception:
+            pass
+    if target_channel:
+        try:
+            await target_channel.send(msg)
+        except Exception:
+            pass
 
 # ==========================================
 # ⚡ 초고속 병렬 처리 대량 교환 로직
@@ -345,6 +399,7 @@ async def process_mass_redeem(gift_code: str, target_channel):
     fail_count = 0
     processed_count = 0
     pass1_failed_list = []
+    blocked = False
     lock = asyncio.Lock()
 
     CONCURRENCY_LIMIT = 2
@@ -354,12 +409,14 @@ async def process_mass_redeem(gift_code: str, target_channel):
         await queue.put(user)
 
     async def worker(context):
-        nonlocal success_count, fail_count, processed_count
+        nonlocal success_count, fail_count, processed_count, blocked
         global cancel_mass_redeem
 
         page = await context.new_page()
 
         while not queue.empty():
+            if blocked:
+                break
             if cancel_mass_redeem:
                 print("🛑 강제 중단 요청 감지. 작업을 멈춥니다.")
                 break
@@ -382,6 +439,10 @@ async def process_mass_redeem(gift_code: str, target_channel):
 
             try:
                 is_success = await execute_redeem_with_page(page, str(uid), server, gift_code, max_retries=3)
+            except AccessBlockedError:
+                blocked = True
+                queue.task_done()
+                break
             except Exception as e:
                 print(f"❌ Exception occurred (UID: {uid}): {e}")
                 is_success = False
@@ -429,6 +490,10 @@ async def process_mass_redeem(gift_code: str, target_channel):
     except Exception as pw_err:
         print(f"❌ Playwright Critical Error: {pw_err}")
 
+    if blocked:
+        await handle_blocked(gift_code, target_channel, status_msg, processed_count, total_users)
+        return
+
     final_failed_list = []
 
     if pass1_failed_list and not cancel_mass_redeem:
@@ -468,7 +533,11 @@ async def process_mass_redeem(gift_code: str, target_channel):
                         final_failed_list.append(f_user)
                         continue
 
-                    retry_success = await execute_redeem_with_page(page, str(f_uid), f_server, gift_code, max_retries=3)
+                    try:
+                        retry_success = await execute_redeem_with_page(page, str(f_uid), f_server, gift_code, max_retries=3)
+                    except AccessBlockedError:
+                        blocked = True
+                        break
 
                     if retry_success:
                         success_count += 1
@@ -484,6 +553,10 @@ async def process_mass_redeem(gift_code: str, target_channel):
             final_failed_list = pass1_failed_list
     else:
         final_failed_list = pass1_failed_list
+
+    if blocked:
+        await handle_blocked(gift_code, target_channel, status_msg, processed_count, total_users)
+        return
 
     if sheet_failed and final_failed_list:
         for f_user in final_failed_list:
@@ -541,6 +614,9 @@ async def monitor_coupon_channel():
     if not channel or not sheet_codes:
         return
 
+    if time.monotonic() < blocked_until:
+        return
+
     try:
         async for message in channel.history(limit=5):
             found_codes = re.findall(r"Code:\s*([a-zA-Z0-9]{6,20})", message.content, re.IGNORECASE)
@@ -554,6 +630,8 @@ async def monitor_coupon_channel():
                 used_records = sheet_codes.get_all_records()
                 if not any(row.get('code') == code for row in used_records):
                     await process_mass_redeem(code, report_channel)
+                    if time.monotonic() < blocked_until:
+                        return  # 차단됨: 나머지 코드도 시도하지 않는다
     except Exception as e:
         print(f"Error during channel monitoring: {e}")
 
