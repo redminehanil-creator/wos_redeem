@@ -125,6 +125,45 @@ async def on_ready():
 # ==========================================
 # 🔄 Playwright 자동 입력 로직
 # ==========================================
+async def log_page_diagnostics(page, uid: str):
+    """입력창을 찾지 못했을 때 페이지 상태를 로그로 남긴다 (차단/렌더링/구조 변경 구분용)."""
+    tag = f"🩺 [Diag UID: {uid}]"
+    try:
+        print(f"{tag} URL: {page.url}")
+        print(f"{tag} Title: '{await page.title()}'")
+    except Exception as e:
+        print(f"{tag} URL/Title 확인 실패: {e}")
+
+    try:
+        body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        snippet = " ".join(body_text.split())[:500]
+        print(f"{tag} Body text(500): {snippet if snippet else '(비어 있음)'}")
+    except Exception as e:
+        print(f"{tag} body 텍스트 확인 실패: {e}")
+
+    try:
+        inputs = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('input')).map(i => ({
+                placeholder: i.placeholder, type: i.type, name: i.name,
+                visible: !!(i.offsetWidth || i.offsetHeight || i.getClientRects().length)
+            }))"""
+        )
+        print(f"{tag} input 개수: {len(inputs)} / 목록: {inputs}")
+    except Exception as e:
+        print(f"{tag} input 목록 확인 실패: {e}")
+
+    try:
+        frames = [f.url for f in page.frames]
+        print(f"{tag} frame {len(frames)}개: {frames}")
+    except Exception as e:
+        print(f"{tag} frame 확인 실패: {e}")
+
+    try:
+        html = await page.content()
+        print(f"{tag} HTML 길이: {len(html)} / 앞 300자: {' '.join(html.split())[:300]}")
+    except Exception as e:
+        print(f"{tag} HTML 확인 실패: {e}")
+
 async def execute_redeem_with_page(
     page, uid: str, server: int, gift_code: str, max_retries: int = 3
 ) -> bool:
@@ -133,27 +172,37 @@ async def execute_redeem_with_page(
             if attempt == 1:
                 await page.goto(
                     "https://wos-giftcode.centurygame.com/",
-                    timeout=20000,
-                    wait_until="commit",
+                    timeout=25000,
+                    wait_until="domcontentloaded",
                 )
             else:
-                await page.reload(timeout=20000, wait_until="commit")
+                await page.reload(timeout=25000, wait_until="domcontentloaded")
 
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2000)
 
-            uid_input = page.locator(
-                "input[placeholder='Player ID'], input[placeholder='플레이어 ID'], input[placeholder*='ID']"
-            ).first
-            await uid_input.wait_for(state="attached", timeout=15000)
+            # Cloudflare 검증 화면 여부 확인용 타이틀 로깅
+            page_title = await page.title()
+            print(f"📄 [UID: {uid}] Page Title: '{page_title}'")
+
+            if any(cf in page_title for cf in ["Just a moment", "Cloudflare", "Attention Required"]):
+                print(f"🚨 [UID: {uid}] Cloudflare 차단 화면 감지됨.")
+
+            # 입력 필드 대기 (visible 상태 대기)
+            uid_input = page.locator("input[placeholder*='ID']").first
+            try:
+                await uid_input.wait_for(state="visible", timeout=15000)
+            except Exception:
+                await log_page_diagnostics(page, uid)
+                raise
             await uid_input.fill(str(uid), timeout=5000)
 
             server_input = page.locator(
-                "input[placeholder='State'], input[placeholder='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
+                "input[placeholder*='State'], input[placeholder*='왕국'], input[placeholder*='서버'], input[placeholder*='Server']"
             ).first
             await server_input.fill(str(server), timeout=5000)
 
             code_input = page.locator(
-                "input[placeholder='Enter Gift Code'], input[placeholder='교환 코드를 입력해 주세요'], input[placeholder*='Code'], input[placeholder*='코드']"
+                "input[placeholder*='Code'], input[placeholder*='코드']"
             ).first
             await code_input.fill(str(gift_code), timeout=5000)
 
@@ -513,7 +562,7 @@ async def before_monitor():
     await bot.wait_until_ready()
 
 # ==========================================
-# 💬 영문 슬래시 커맨드 구역 (defer 추가로 3초 타임아웃 방지)
+# 💬 영문 슬래시 커맨드 구역 (defer 적용)
 # ==========================================
 
 # 1. Register Account / Alt
